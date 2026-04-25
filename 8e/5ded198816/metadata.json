@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "8e5ded198816",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "model_service/deploy/modal_app.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/8e/5ded198816/0/metadata.json",
+      "transcript": "/8e/5ded198816/0/full.jsonl",
+      "content_hash": "/8e/5ded198816/0/content_hash.txt",
+      "prompt": ""
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 7,
+    "cache_creation_tokens": 14723,
+    "cache_read_tokens": 5587655,
+    "output_tokens": 12430,
+    "api_call_count": 7
+  }
+}
