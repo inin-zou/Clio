@@ -1,0 +1,5 @@
+继续我们刚刚的  1. Step 1-3 first: 控制 WS 连接 + 基础 LiveKit room join + 简单 audio echo (验证连接通了)
+  2. Step 4a: PersonaPlex per-frame loop (核心)
+  3. Step 5: 接 backend directives 进 forced_text_token 队列
+  4. Step 6: VAD turn boundary detection
+  5. Step 4b: Scribe v2 添加 (可放到最后, gate 不依赖 Scribe)
