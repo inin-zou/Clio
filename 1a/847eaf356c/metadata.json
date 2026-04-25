@@ -1,0 +1,25 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "1a847eaf356c",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 1,
+  "files_touched": [
+    "backend/app/reasoner/extractor.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/1a/847eaf356c/0/metadata.json",
+      "transcript": "/1a/847eaf356c/0/full.jsonl",
+      "content_hash": "/1a/847eaf356c/0/content_hash.txt",
+      "prompt": "/1a/847eaf356c/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 53036,
+    "cache_creation_tokens": 1468623,
+    "cache_read_tokens": 74550591,
+    "output_tokens": 358708,
+    "api_call_count": 192
+  }
+}

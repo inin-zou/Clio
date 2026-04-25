@@ -1,0 +1,45 @@
+但是你觉得现在外挂数据库得到答案的速度有多快？我们不想用similarity search，倾向于file sys直接search
+
+---
+
+我也觉得方案a ok的，我们现在就是需要latency最低，写吧
+
+---
+
+make sense, let's do that
+
+---
+
+yes go on
+
+---
+
+我们哈没有虚拟环境初始化在repo吗？捏能帮我用uv做一下吗？
+
+---
+
+而且我觉得在电话之前，我们是否让voice agent知道我们现在是几点？
+
+---
+
+而且我觉得在电话之前，我们是否让voice agent知道我们现在是几点？（这个感觉可以是给每个session的role prompt里面加一句））
+
+---
+
+而且我觉得在电话之前，我们是否让voice agent知道我们现在是几点？（这个感觉可以是给每个session开始前，看一下时间，然后在session的role prompt里面加一句）
+
+---
+
+commit push先，然后我们在继续
+
+---
+
+为什么要PR，我们直接push到main branch就好了
+
+---
+
+ok，你能看看reddits上面大家推荐的最快的LLM inference吗？听说了xAI也很快？
+
+---
+
+ok，那我们就先这样就好了，继续之前计划
