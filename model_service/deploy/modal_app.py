@@ -251,47 +251,189 @@ class PersonaPlexService:
         )
 
     @modal.method()
-    async def join_call(
+    async def process_call(
         self,
+        call_id: str,
         livekit_room: str,
-        livekit_token: str,
-        system_prompt: str,
-        voice_prompt_id: str = "NATF1",
-        backend_control_url: str = "",
+        livekit_agent_token: str,
+        backend_control_url: str,
     ) -> dict:
-        """Handle one inbound call.
+        """Handle one inbound call. Long-running (call duration up to 1h).
 
-        Backend invokes this when Twilio dispatches a call into a LiveKit
-        room. The container joins that room as the agent participant and
-        runs Sarah for the call's duration.
+        Step 1-3 implementation: control-plane WS handshake + LiveKit room
+        join + audio echo (caller audio passed straight back to validate
+        the wiring). PersonaPlex inference and Reasoner-driven injection
+        come in subsequent steps.
 
         Args:
-            livekit_room: LiveKit room name (one per call).
-            livekit_token: LiveKit access token for the agent participant.
-            system_prompt: BASE_PERSONA + time block from
-                backend.app.reasoner.persona.session_system_prompt(now=...).
-            voice_prompt_id: Which Sarah voice to use ("NATF1"/"NATF2"/etc.).
-            backend_control_url: WebSocket URL where backend's Reasoner is
-                listening for ReasonerDirectives + transcript events.
+            call_id: matches the path the WS will be served at on backend
+                (`{backend_control_url}/control/{call_id}`).
+            livekit_room: LiveKit room name (one per call). Logged but not
+                used directly; the agent_token is what authorizes the join.
+            livekit_agent_token: signed JWT for joining the room as agent.
+            backend_control_url: backend base URL, e.g. wss://abc.ngrok.app.
 
         Returns:
-            Summary dict with call_id, duration, frame counts. Backend
-            persists this for post-call analysis.
+            Summary dict — frame_count + ok flag.
         """
-        # TODO(clio): implement the actual agent loop:
-        #   1. Connect to LiveKit room (livekit-agents SDK).
-        #   2. Open backend control WS for directives + transcript push.
-        #   3. Subscribe to caller audio track; for each 80ms frame:
-        #        a. Read latest forced_text_token from the directive cache.
-        #        b. tokens = self.lm_gen.step(input_tokens=..., text_token=...)
-        #        c. Decode agent audio with Mimi; publish to LiveKit room.
-        #        d. Push agent text token to backend over control WS.
-        #   4. Run ElevenLabs Scribe v2 stream in parallel on caller audio
-        #      → push transcript turns to backend (entity verification).
-        #   5. Loop until LiveKit room disconnect.
+        import asyncio
+        import json
+        import logging
+        import os
+        import time
+
+        import websockets
+        from livekit import rtc
+
+        logger = logging.getLogger("personaplex.process_call")
+        logger.info("call %s: process_call started", call_id)
+
+        livekit_url = os.environ.get("LIVEKIT_URL")
+        if not livekit_url:
+            logger.error("LIVEKIT_URL not set in Modal secrets")
+            return {"ok": False, "error": "LIVEKIT_URL not set"}
+
+        ws_url = f"{backend_control_url.rstrip('/')}/control/{call_id}"
+        t_call_started = time.perf_counter()
+        frame_count = 0
+        room: rtc.Room | None = None
+
+        try:
+            async with websockets.connect(ws_url, max_size=2**20) as ws:
+                logger.info("call %s: control WS connected to %s", call_id, ws_url)
+
+                # ─── Step 1: receive SessionStart from backend ─────────
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
+                except asyncio.TimeoutError:
+                    return {"ok": False, "error": "timeout waiting for SessionStart"}
+
+                session_start = json.loads(raw)
+                if session_start.get("type") != "session_start":
+                    return {
+                        "ok": False,
+                        "error": f"expected session_start, got {session_start.get('type')}",
+                    }
+                system_prompt = session_start["system_prompt"]
+                voice_prompt_id = session_start["voice_prompt_id"]
+                logger.info(
+                    "call %s: SessionStart received (voice=%s, prompt %d chars)",
+                    call_id, voice_prompt_id, len(system_prompt),
+                )
+
+                # ─── Step 2: join LiveKit room ─────────────────────────
+                room = rtc.Room()
+                caller_audio_track: rtc.RemoteAudioTrack | None = None
+                track_subscribed = asyncio.Event()
+
+                @room.on("track_subscribed")
+                def _on_track(
+                    track: rtc.Track,
+                    publication: rtc.RemoteTrackPublication,
+                    participant: rtc.RemoteParticipant,
+                ) -> None:
+                    nonlocal caller_audio_track
+                    if track.kind == rtc.TrackKind.KIND_AUDIO and caller_audio_track is None:
+                        caller_audio_track = track
+                        track_subscribed.set()
+                        logger.info(
+                            "call %s: subscribed to caller audio (participant=%s)",
+                            call_id, participant.identity,
+                        )
+
+                @room.on("disconnected")
+                def _on_disconnect() -> None:
+                    logger.info("call %s: room disconnected", call_id)
+
+                await room.connect(livekit_url, livekit_agent_token)
+                logger.info("call %s: joined LiveKit room %s as agent", call_id, livekit_room)
+
+                # ─── Step 3: publish our agent audio track ─────────────
+                # 24kHz mono — matches Mimi codec output. PersonaPlex frames
+                # written to this source will reach the caller via WebRTC.
+                audio_source = rtc.AudioSource(sample_rate=24000, num_channels=1)
+                agent_track = rtc.LocalAudioTrack.create_audio_track(
+                    "sarah-agent-audio", audio_source
+                )
+                await room.local_participant.publish_track(agent_track)
+                logger.info("call %s: published agent audio track", call_id)
+
+                # Backend can now safely start sending directives.
+                cold_start = time.perf_counter() - t_call_started
+                await ws.send(json.dumps({
+                    "type": "session_ready",
+                    "call_id": call_id,
+                    "voice_prompt_id": voice_prompt_id,
+                    "cold_start_seconds": cold_start,
+                }))
+                logger.info("call %s: SessionReady sent (%.2fs)", call_id, cold_start)
+
+                # Wait for caller audio (Twilio SIP trunk publishes it after
+                # the call connects). 30s grace.
+                try:
+                    await asyncio.wait_for(track_subscribed.wait(), timeout=30)
+                except asyncio.TimeoutError:
+                    logger.error("call %s: timed out waiting for caller audio track", call_id)
+                    return {"ok": False, "error": "no caller audio track within 30s"}
+
+                # ─── Step 1-3 validation: echo loop ────────────────────
+                # For now we just pass caller audio back to the room. Once
+                # this works end-to-end, Step 4a swaps the echo for
+                # Mimi.encode → lm_gen.step → Mimi.decode.
+                logger.info("call %s: starting echo loop (Step 1-3 validation)", call_id)
+                audio_stream = rtc.AudioStream(
+                    caller_audio_track, sample_rate=24000, num_channels=1
+                )
+
+                async for event in audio_stream:
+                    await audio_source.capture_frame(event.frame)
+                    frame_count += 1
+                    if frame_count == 1:
+                        logger.info(
+                            "call %s: first audio frame received "
+                            "(samples=%d, rate=%dHz)",
+                            call_id, event.frame.samples_per_channel,
+                            event.frame.sample_rate,
+                        )
+                    if frame_count % 250 == 0:  # ~20s at 12.5Hz
+                        elapsed = time.perf_counter() - t_call_started
+                        logger.debug(
+                            "call %s: echoed %d frames (%.1fs elapsed)",
+                            call_id, frame_count, elapsed,
+                        )
+
+                logger.info("call %s: audio stream ended after %d frames",
+                            call_id, frame_count)
+
+                # ─── Cleanup ──────────────────────────────────────────
+                await ws.send(json.dumps({
+                    "type": "session_closed",
+                    "call_id": call_id,
+                    "reason": "audio stream ended",
+                    "duration_seconds": time.perf_counter() - t_call_started,
+                }))
+
+        except websockets.exceptions.ConnectionClosed as e:
+            logger.warning("call %s: control WS closed unexpectedly: %s", call_id, e)
+        except Exception as e:
+            logger.exception("call %s: process_call crashed: %s", call_id, e)
+            return {
+                "ok": False,
+                "error": str(e),
+                "frame_count": frame_count,
+            }
+        finally:
+            if room is not None:
+                try:
+                    await room.disconnect()
+                except Exception:
+                    pass
+
         return {
-            "ok": False,
-            "error": "join_call not yet implemented — see TODO in modal_app.py",
+            "ok": True,
+            "call_id": call_id,
+            "frame_count": frame_count,
+            "duration_seconds": time.perf_counter() - t_call_started,
         }
 
     @modal.method()
