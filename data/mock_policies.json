@@ -1,0 +1,450 @@
+{
+  "_README": "Mock policy DB for Clio. Indexed by license_plate (primary) and policy_number (alternate). Reasoner queries via PolicyContext at call start. Field names match backend/app/reasoner/schema.py:PolicyContext.",
+
+  "by_license_plate": {
+    "B-AL-1234": "POL-2024-001",
+    "M-XK-7788": "POL-2024-002",
+    "HH-CR-9001": "POL-2023-014",
+    "B-DR-4242": "POL-2024-007",
+    "K-EV-2025": "POL-2025-031"
+  },
+
+  "policies": {
+    "POL-2024-001": {
+      "policy_number": "POL-2024-001",
+      "product_name": "KFZ Komfort",
+      "tariff_version": "AKB 2024.1",
+      "underwriting_insurer": "Allianz Versicherungs-AG",
+      "broker_id": null,
+      "effective_date": "2024-03-15",
+      "renewal_date": "2025-03-15",
+      "cancellation_status": "active",
+      "premium_in_arrears": false,
+
+      "license_plate": "B-AL-1234",
+      "vin": "WVWZZZ1KZAW123456",
+      "make": "VW",
+      "model": "Golf VIII",
+      "first_registration": "2022-04-01",
+      "engine_power_kw": 110,
+      "fuel_type": "petrol",
+      "vehicle_value_at_inception_eur": 28500.00,
+      "current_sum_insured_eur": 24000.00,
+      "use_type": "private",
+      "annual_mileage_band": "10000-15000",
+      "garage_address": "Schönhauser Allee 142, 10437 Berlin",
+      "modifications_declared": [],
+
+      "liability_sum_eur": 100000000,
+      "kasko_type": "vollkasko",
+      "deductible_vollkasko_eur": 500.00,
+      "deductible_teilkasko_eur": 150.00,
+      "add_ons": ["Schutzbrief", "Auslandsschadenschutz"],
+      "sf_klasse_liability": "SF 14",
+      "sf_klasse_vollkasko": "SF 14",
+      "rabattretter": true,
+      "rabattschutz": false,
+      "werkstattbindung": false,
+      "werkstatt_network": null,
+
+      "fahrerkreis": "named",
+      "age_restriction_min": null,
+      "declared_drivers": [
+        {
+          "full_name": "Anna Schmidt",
+          "dob": "1985-06-12",
+          "license_held_since": "2003-08-01",
+          "is_occasional_surcharge": false
+        }
+      ],
+
+      "country_coverage": ["DE", "EU"],
+      "saisonkennzeichen": null,
+      "race_exclusion": true,
+      "gross_negligence_waiver": "standard",
+      "telematics_required_active": false,
+
+      "policyholder": {
+        "full_name": "Anna Schmidt",
+        "dob": "1985-06-12",
+        "address": "Schönhauser Allee 142, 10437 Berlin",
+        "phone": "+49 30 12345678",
+        "email": "anna.schmidt@example.de",
+        "preferred_language": "en",
+        "preferred_channel": "email",
+        "vulnerable_flags": [],
+        "legal_representative": null,
+        "consent_marketing": false,
+        "consent_telematics": false,
+        "consent_data_sharing": false
+      },
+
+      "prior_claims": [],
+      "open_claims": [],
+      "fraud_flags": [],
+      "his_hits": [],
+      "pre_existing_damage": [],
+      "last_known_mileage": 38420,
+      "telematics": null,
+      "last_hu_au": "2024-04-10"
+    },
+
+    "POL-2024-002": {
+      "policy_number": "POL-2024-002",
+      "product_name": "KFZ Basis",
+      "tariff_version": "AKB 2024.1",
+      "underwriting_insurer": "Allianz Versicherungs-AG",
+      "broker_id": "BRK-MUC-0042",
+      "effective_date": "2024-09-01",
+      "renewal_date": "2025-09-01",
+      "cancellation_status": "active",
+      "premium_in_arrears": true,
+
+      "license_plate": "M-XK-7788",
+      "vin": "WBA5R7C50KA123987",
+      "make": "BMW",
+      "model": "320i Touring",
+      "first_registration": "2019-06-15",
+      "engine_power_kw": 135,
+      "fuel_type": "petrol",
+      "vehicle_value_at_inception_eur": 22000.00,
+      "current_sum_insured_eur": 17500.00,
+      "use_type": "commercial",
+      "annual_mileage_band": "30000-40000",
+      "garage_address": "Maximilianstraße 9, 80539 München",
+      "modifications_declared": ["sport exhaust"],
+
+      "liability_sum_eur": 100000000,
+      "kasko_type": "teilkasko",
+      "deductible_vollkasko_eur": null,
+      "deductible_teilkasko_eur": 300.00,
+      "add_ons": [],
+      "sf_klasse_liability": "SF 5",
+      "sf_klasse_vollkasko": null,
+      "rabattretter": false,
+      "rabattschutz": false,
+      "werkstattbindung": true,
+      "werkstatt_network": "AllianzPartner DE",
+
+      "fahrerkreis": "open_with_age_restriction",
+      "age_restriction_min": 25,
+      "declared_drivers": [
+        {
+          "full_name": "Markus Krüger",
+          "dob": "1978-02-20",
+          "license_held_since": "1996-05-04",
+          "is_occasional_surcharge": false
+        }
+      ],
+
+      "country_coverage": ["DE", "EU"],
+      "saisonkennzeichen": null,
+      "race_exclusion": true,
+      "gross_negligence_waiver": "standard",
+      "telematics_required_active": false,
+
+      "policyholder": {
+        "full_name": "Krüger Logistik GmbH",
+        "dob": "1978-02-20",
+        "address": "Maximilianstraße 9, 80539 München",
+        "phone": "+49 89 87654321",
+        "email": "fleet@krueger-logistik.de",
+        "preferred_language": "en",
+        "preferred_channel": "phone",
+        "vulnerable_flags": [],
+        "legal_representative": "Markus Krüger",
+        "consent_marketing": false,
+        "consent_telematics": false,
+        "consent_data_sharing": false
+      },
+
+      "prior_claims": [
+        {
+          "claim_number": "CL-2023-04421",
+          "incident_date": "2023-11-08",
+          "incident_type": "collision",
+          "settlement_amount_eur": 4200.00,
+          "fault_quota": 0.5,
+          "status": "settled"
+        }
+      ],
+      "open_claims": [],
+      "fraud_flags": [],
+      "his_hits": [],
+      "pre_existing_damage": [
+        "rear bumper scuff (left side, photographed at last inspection)"
+      ],
+      "last_known_mileage": 92350,
+      "telematics": null,
+      "last_hu_au": "2023-08-22"
+    },
+
+    "POL-2023-014": {
+      "policy_number": "POL-2023-014",
+      "product_name": "KFZ Premium",
+      "tariff_version": "AKB 2023.2",
+      "underwriting_insurer": "Allianz Versicherungs-AG",
+      "broker_id": null,
+      "effective_date": "2023-05-01",
+      "renewal_date": "2025-05-01",
+      "cancellation_status": "active",
+      "premium_in_arrears": false,
+
+      "license_plate": "HH-CR-9001",
+      "vin": "WAUZZZ8E58A089234",
+      "make": "Audi",
+      "model": "Q5",
+      "first_registration": "2021-08-12",
+      "engine_power_kw": 150,
+      "fuel_type": "diesel",
+      "vehicle_value_at_inception_eur": 41000.00,
+      "current_sum_insured_eur": 35000.00,
+      "use_type": "private",
+      "annual_mileage_band": "15000-20000",
+      "garage_address": "Mittelweg 78, 20148 Hamburg",
+      "modifications_declared": [],
+
+      "liability_sum_eur": 100000000,
+      "kasko_type": "vollkasko",
+      "deductible_vollkasko_eur": 300.00,
+      "deductible_teilkasko_eur": 150.00,
+      "add_ons": ["GAP", "Schutzbrief", "Fahrerschutz", "Auslandsschadenschutz"],
+      "sf_klasse_liability": "SF 22",
+      "sf_klasse_vollkasko": "SF 22",
+      "rabattretter": true,
+      "rabattschutz": true,
+      "werkstattbindung": false,
+      "werkstatt_network": null,
+
+      "fahrerkreis": "named",
+      "age_restriction_min": null,
+      "declared_drivers": [
+        {
+          "full_name": "Thomas Becker",
+          "dob": "1972-09-30",
+          "license_held_since": "1990-11-15",
+          "is_occasional_surcharge": false
+        },
+        {
+          "full_name": "Lisa Becker",
+          "dob": "1975-04-22",
+          "license_held_since": "1993-07-08",
+          "is_occasional_surcharge": false
+        }
+      ],
+
+      "country_coverage": ["DE", "EU", "CH"],
+      "saisonkennzeichen": null,
+      "race_exclusion": true,
+      "gross_negligence_waiver": "full",
+      "telematics_required_active": false,
+
+      "policyholder": {
+        "full_name": "Thomas Becker",
+        "dob": "1972-09-30",
+        "address": "Mittelweg 78, 20148 Hamburg",
+        "phone": "+49 40 4567890",
+        "email": "t.becker@example.de",
+        "preferred_language": "en",
+        "preferred_channel": "email",
+        "vulnerable_flags": [],
+        "legal_representative": null,
+        "consent_marketing": true,
+        "consent_telematics": false,
+        "consent_data_sharing": false
+      },
+
+      "prior_claims": [],
+      "open_claims": [],
+      "fraud_flags": [],
+      "his_hits": [],
+      "pre_existing_damage": [],
+      "last_known_mileage": 47800,
+      "telematics": null,
+      "last_hu_au": "2024-09-05"
+    },
+
+    "POL-2024-007": {
+      "policy_number": "POL-2024-007",
+      "product_name": "KFZ Komfort",
+      "tariff_version": "AKB 2024.1",
+      "underwriting_insurer": "Allianz Versicherungs-AG",
+      "broker_id": null,
+      "effective_date": "2024-01-10",
+      "renewal_date": "2025-01-10",
+      "cancellation_status": "active",
+      "premium_in_arrears": false,
+
+      "license_plate": "B-DR-4242",
+      "vin": "VF7XXXXXXX1234567",
+      "make": "Peugeot",
+      "model": "208",
+      "first_registration": "2017-03-19",
+      "engine_power_kw": 60,
+      "fuel_type": "petrol",
+      "vehicle_value_at_inception_eur": 8200.00,
+      "current_sum_insured_eur": 6500.00,
+      "use_type": "private",
+      "annual_mileage_band": "5000-10000",
+      "garage_address": "Karl-Marx-Allee 67, 10243 Berlin",
+      "modifications_declared": [],
+
+      "liability_sum_eur": 100000000,
+      "kasko_type": "teilkasko",
+      "deductible_vollkasko_eur": null,
+      "deductible_teilkasko_eur": 150.00,
+      "add_ons": [],
+      "sf_klasse_liability": "SF 1",
+      "sf_klasse_vollkasko": null,
+      "rabattretter": false,
+      "rabattschutz": false,
+      "werkstattbindung": false,
+      "werkstatt_network": null,
+
+      "fahrerkreis": "open_with_age_restriction",
+      "age_restriction_min": 23,
+      "declared_drivers": [
+        {
+          "full_name": "Daniel Roth",
+          "dob": "2000-05-17",
+          "license_held_since": "2018-08-02",
+          "is_occasional_surcharge": false
+        }
+      ],
+
+      "country_coverage": ["DE", "EU"],
+      "saisonkennzeichen": null,
+      "race_exclusion": true,
+      "gross_negligence_waiver": "standard",
+      "telematics_required_active": false,
+
+      "policyholder": {
+        "full_name": "Daniel Roth",
+        "dob": "2000-05-17",
+        "address": "Karl-Marx-Allee 67, 10243 Berlin",
+        "phone": "+49 30 99887766",
+        "email": "daniel.roth@example.de",
+        "preferred_language": "en",
+        "preferred_channel": "portal",
+        "vulnerable_flags": [],
+        "legal_representative": null,
+        "consent_marketing": false,
+        "consent_telematics": false,
+        "consent_data_sharing": false
+      },
+
+      "prior_claims": [
+        {
+          "claim_number": "CL-2024-01987",
+          "incident_date": "2024-06-14",
+          "incident_type": "parking",
+          "settlement_amount_eur": 850.00,
+          "fault_quota": 0.0,
+          "status": "settled"
+        },
+        {
+          "claim_number": "CL-2024-08123",
+          "incident_date": "2024-11-22",
+          "incident_type": "collision",
+          "settlement_amount_eur": 3200.00,
+          "fault_quota": 1.0,
+          "status": "settled"
+        }
+      ],
+      "open_claims": [],
+      "fraud_flags": ["frequency_review_2024"],
+      "his_hits": [],
+      "pre_existing_damage": [
+        "left front fender dent (claim CL-2024-08123)",
+        "rear hatch scratches (claim CL-2024-01987)"
+      ],
+      "last_known_mileage": 76500,
+      "telematics": null,
+      "last_hu_au": "2024-02-28"
+    },
+
+    "POL-2025-031": {
+      "policy_number": "POL-2025-031",
+      "product_name": "KFZ E-Mobil",
+      "tariff_version": "AKB 2025.1",
+      "underwriting_insurer": "Allianz Versicherungs-AG",
+      "broker_id": null,
+      "effective_date": "2025-02-01",
+      "renewal_date": "2026-02-01",
+      "cancellation_status": "active",
+      "premium_in_arrears": false,
+
+      "license_plate": "K-EV-2025",
+      "vin": "WDD1672221A123789",
+      "make": "Tesla",
+      "model": "Model Y",
+      "first_registration": "2024-12-10",
+      "engine_power_kw": 220,
+      "fuel_type": "electric",
+      "vehicle_value_at_inception_eur": 52000.00,
+      "current_sum_insured_eur": 50000.00,
+      "use_type": "private",
+      "annual_mileage_band": "15000-20000",
+      "garage_address": "Hohenstaufenring 30, 50674 Köln",
+      "modifications_declared": [],
+
+      "liability_sum_eur": 100000000,
+      "kasko_type": "vollkasko",
+      "deductible_vollkasko_eur": 1000.00,
+      "deductible_teilkasko_eur": 300.00,
+      "add_ons": ["Ladeinfrastruktur", "Schutzbrief", "Neuwertentschädigung_24m"],
+      "sf_klasse_liability": "SF 9",
+      "sf_klasse_vollkasko": "SF 9",
+      "rabattretter": true,
+      "rabattschutz": false,
+      "werkstattbindung": false,
+      "werkstatt_network": null,
+
+      "fahrerkreis": "named",
+      "age_restriction_min": null,
+      "declared_drivers": [
+        {
+          "full_name": "Sarah Wagner",
+          "dob": "1990-11-03",
+          "license_held_since": "2008-12-15",
+          "is_occasional_surcharge": false
+        }
+      ],
+
+      "country_coverage": ["DE", "EU", "NO", "CH"],
+      "saisonkennzeichen": null,
+      "race_exclusion": true,
+      "gross_negligence_waiver": "standard",
+      "telematics_required_active": true,
+
+      "policyholder": {
+        "full_name": "Sarah Wagner",
+        "dob": "1990-11-03",
+        "address": "Hohenstaufenring 30, 50674 Köln",
+        "phone": "+49 221 5544332",
+        "email": "sarah.wagner@example.de",
+        "preferred_language": "en",
+        "preferred_channel": "email",
+        "vulnerable_flags": [],
+        "legal_representative": null,
+        "consent_marketing": false,
+        "consent_telematics": true,
+        "consent_data_sharing": false
+      },
+
+      "prior_claims": [],
+      "open_claims": [],
+      "fraud_flags": [],
+      "his_hits": [],
+      "pre_existing_damage": [],
+      "last_known_mileage": 8420,
+      "telematics": {
+        "last_seen_at": "2026-04-25T10:14:00Z",
+        "last_known_location": [50.9375, 6.9603],
+        "last_known_speed_kmh": 0.0,
+        "airbag_event_within_24h": false
+      },
+      "last_hu_au": null
+    }
+  }
+}

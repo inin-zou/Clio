@@ -1,0 +1,82 @@
+# ─── Secrets ────────────────────────────────────────────────────────────────
+# Never commit any .env files. Use .env.example for documentation.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ─── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.uv/
+.python-version
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+htmlcov/
+.coverage
+.coverage.*
+build/
+dist/
+*.egg
+
+# ─── Node / Next.js ─────────────────────────────────────────────────────────
+node_modules/
+.next/
+out/
+.turbo/
+.pnpm-store/
+*.tsbuildinfo
+
+# ─── IDE / editors ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── OS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── Audio artifacts (potentially large, often regenerable) ─────────────────
+# Test recordings — uncomment if you want these tracked
+*.wav
+*.mp3
+*.flac
+*.ogg
+# allow assets that are small/checked-in fixtures
+!model_service/assets/rescue_clips/*.wav
+!data/eval/fixtures/*.wav
+
+# ─── Model weights / large artifacts ────────────────────────────────────────
+*.pt
+*.safetensors
+*.bin
+*.gguf
+!model_service/assets/voices/*.pt   # voice prompt embeddings are small + useful
+
+# ─── Generated synthetic data (large; regenerable from tools/) ──────────────
+# Uncomment if dialogues should be tracked:
+# !data/dialogues/*.jsonl
+
+# ─── Modal / Vercel / Twilio local state ────────────────────────────────────
+.modal/
+.vercel/
+.twilio/
+
+# ─── Logs ───────────────────────────────────────────────────────────────────
+*.log
+logs/
+
+# ─── Temp files ─────────────────────────────────────────────────────────────
+tmp/
+temp/
+.tmp/

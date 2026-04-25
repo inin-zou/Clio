@@ -1,0 +1,58 @@
+[project]
+name = "clio"
+version = "0.1.0"
+description = "Voice agent for inbound insurance claim calls — Inca hackathon"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Clio team" }]
+
+dependencies = [
+    # Schema + validation
+    "pydantic>=2.10",
+    "python-dotenv>=1.0",
+
+    # LLM client (Reasoner slot extractor)
+    "anthropic>=0.40",
+
+    # Telephony / agent runtime
+    "livekit-agents>=0.12",
+    "livekit-plugins-elevenlabs>=0.7",
+
+    # HTTP / SSE for monitoring API
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+
+    # WebSocket client for talking to model_service
+    "websockets>=13",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["backend"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "RUF"]
+ignore = ["E501"]  # let formatter handle line length
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["backend/tests", "tests"]
