@@ -1,0 +1,39 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "5be5a908a0f8",
+  "session_id": "000bf37f-e4a3-4e37-804d-2fad2928e440",
+  "strategy": "manual-commit",
+  "created_at": "2026-04-25T20:35:19.901539Z",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "model_service/deploy/modal_app.py"
+  ],
+  "agent": "Claude Code",
+  "model": "",
+  "turn_id": "2f2f2a50cf1a",
+  "checkpoint_transcript_start": 2350,
+  "transcript_lines_at_start": 2350,
+  "token_usage": {
+    "input_tokens": 8,
+    "cache_creation_tokens": 12852,
+    "cache_read_tokens": 6500823,
+    "output_tokens": 11719,
+    "api_call_count": 8
+  },
+  "session_metrics": {
+    "turn_count": 21
+  },
+  "initial_attribution": {
+    "calculated_at": "2026-04-25T20:35:19.837823Z",
+    "agent_lines": 221,
+    "agent_removed": 8,
+    "human_added": 0,
+    "human_modified": 0,
+    "human_removed": 0,
+    "total_committed": 221,
+    "total_lines_changed": 229,
+    "agent_percentage": 100,
+    "metric_version": 2
+  }
+}
