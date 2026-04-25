@@ -1,0 +1,60 @@
+Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_ap
+│   p.py
+└── 🔨 Created function PersonaPlexService.*.
+✓ App deployed in 210.712s! 🎉
+
+View Deployment: https://modal.com/apps/dreamonzouk/main/deployed/personaplex-clio
+
+---
+
+E 都设置好了，所有.env 都根据.env.example设计了
+…/Clio main !2s
+❯ modal run model_service/deploy/modal_app.py::warmup_test
+✓ Initialized. View run at https://modal.com/apps/dreamonzouk/main/ap-t7RtyKsuIH2ALQcB1VoX1Z
+✓ Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_ap
+│   p.py
+└── 🔨 Created function PersonaPlexService.*.
+[setup] loading Mimi codec from nvidia/personaplex-7b-v1 ...
+[setup]   mimi loaded (5.2s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.3s)
+[setup] loading Moshi LM (this is the 7B weights)...
+[setup]   LM loaded to GPU (24.5s)
+[setup] constructing LMGen ...
+[setup]   LMGen ready (0.1s)
+[setup] warmup pass (compiles CUDA graphs)...
+[setup]   warmup done (28.6s)
+[setup] PersonaPlex ready — total 59.0s
+health: {'ok': True, 'model_loaded': True, 'demo_mode': False}
+Stopping app - local entrypoint completed.
+✓ App completed. View run at https://modal.com/apps/dreamonzouk/main/ap-t7RtyKsuIH2ALQcB1VoX1Z
+
+---
+
+E 都设置好了，所有.env 都根据.env.example设计填好了
+…/Clio main !2s
+❯ modal run model_service/deploy/modal_app.py::warmup_test
+✓ Initialized. View run at https://modal.com/apps/dreamonzouk/main/ap-t7RtyKsuIH2ALQcB1VoX1Z
+✓ Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_ap
+│   p.py
+└── 🔨 Created function PersonaPlexService.*.
+[setup] loading Mimi codec from nvidia/personaplex-7b-v1 ...
+[setup]   mimi loaded (5.2s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.3s)
+[setup] loading Moshi LM (this is the 7B weights)...
+[setup]   LM loaded to GPU (24.5s)
+[setup] constructing LMGen ...
+[setup]   LMGen ready (0.1s)
+[setup] warmup pass (compiles CUDA graphs)...
+[setup]   warmup done (28.6s)
+[setup] PersonaPlex ready — total 59.0s
+health: {'ok': True, 'model_loaded': True, 'demo_mode': False}
+Stopping app - local entrypoint completed.
+✓ App completed. View run at https://modal.com/apps/dreamonzouk/main/ap-t7RtyKsuIH2ALQcB1VoX1Z
