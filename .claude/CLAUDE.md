@@ -8,6 +8,17 @@ Voice agent for inbound insurance claim calls, built for the [Inca hackathon](ht
 
 The agent is **Sarah** — Allianz Berlin claims rep, 8 years on the desk. English only.
 
+## Where we are right now (TL;DR)
+
+The architecture is fully wired up in code but the **first end-to-end phone call has never been made**. The remaining critical path:
+
+1. Write the **Twilio inbound webhook** in `backend/app/telephony/` (mints LiveKit room+token, registers PendingCall, spawns Modal `process_call.spawn(...)`, returns TwiML).
+2. Expose backend on a public URL (ngrok for dev, Modal CPU / Render for prod) so Modal can WS-connect back.
+3. Configure Twilio Console's "A Call Comes In" webhook to that URL.
+4. Make a real call — debug whatever blows up.
+
+Everything below the architecture-decision and reasoner layer is solid; the unknown is whether the LiveKit/PersonaPlex/audio plumbing in `model_service/deploy/modal_app.py:process_call()` works in practice. We've verified the imports, syntax, and `setup()`; the per-frame loop hasn't seen real audio.
+
 ## Stack (locked)
 
 | Layer | Choice |
@@ -38,19 +49,47 @@ Why: a backend-relay design adds 60-200ms per audio frame round-trip, eliminatin
 
 ## What's done vs in flight
 
-| Component | Status |
+### Verified live ✅
+| Component | Notes |
 |---|---|
-| `.claude/docs/` (architecture, roadmap, FNOL schema, MoshiRAG/ASPIRin analyses) | ✅ |
-| `backend/app/reasoner/` (db, schema, persona, extractor, state, drip, gate, taxonomy) | ✅ smoke + unit tests |
-| `backend/app/control/` (orchestrator + WS server) | ✅ 6 unit tests pass |
-| `model_service/server/` (mock-talker stack for protocol dev) | ✅ 5 tests pass |
-| `model_service/deploy/modal_app.py` — image, secrets, `setup()` | ✅ verified live: PersonaPlex loads in 59s on A100 |
-| `model_service/deploy/modal_app.py` — `process_call()` (LiveKit Agent + per-frame loop) | 🚧 stubbed |
-| Backend Twilio webhook handler | 🚧 not started |
-| Frontend monitoring UI | 🚧 not started |
-| Modal deployed app | ✅ `personaplex-clio` on `dreamonzouk` workspace |
-| Modal secrets | ✅ `hf-token`, `clio-livekit`, `clio-anthropic`, `clio-elevenlabs` |
-| `.env` populated locally per `.env.example` | ✅ |
+| `.claude/docs/` (architecture, roadmap, FNOL schema, MoshiRAG/ASPIRin analyses) | source of truth for design |
+| `backend/app/reasoner/` (db, schema, persona, extractor, state, drip, gate, taxonomy) | each module has `__main__` smoke tests |
+| `backend/app/control/` (orchestrator + WS server) | 6 unit tests pass; FastAPI server boots cleanly |
+| `model_service/server/` (mock-talker stack for protocol dev) | 5 tests pass |
+| `model_service/deploy/modal_app.py` — image build + `setup()` | PersonaPlex 7B + 18 voice prompts (NATF/NATM/VARF/VARM) load in 56s on A100 |
+| Modal deployed app | `personaplex-clio` on `dreamonzouk` workspace; secrets attached |
+| Modal secrets | `hf-token`, `clio-livekit`, `clio-anthropic`, `clio-elevenlabs` |
+| `.env` populated locally per `.env.example` | all 9 keys present |
+| Live extractor end-to-end test | Anthropic Haiku 4.5 returns valid Pydantic-validated slot updates from a sample FNOL transcript |
+
+### Code written but NOT YET tested with real audio ⚠️
+The whole inference loop in `process_call()` has been deployed to Modal (compiles + setup runs) but has never been exercised with actual caller audio. Possible bugs hiding:
+- `lm_gen.load_voice_prompt_embeddings(.pt path)` — exact API shape unconfirmed
+- `lm_gen.text_prompt_tokens = list[int]` vs tensor format
+- LiveKit Agent joining a SIP-trunk-sourced room (vs WebRTC participant)
+- LiveKit's actual frame size delivery (we buffer for non-1920 chunks but assumption is untested)
+- VAD threshold (0.005 RMS, 800ms silence) under real PSTN audio levels
+- Forced `text_token` tensor dtype (`long` chosen; not validated)
+- Backend ↔ Modal WebSocket connectivity from inside Modal container
+
+### 🚧 Not yet written (blocks first end-to-end test)
+| Component | Estimated work |
+|---|---|
+| **Backend Twilio webhook handler** (`/twilio/voice`): mint LiveKit room+token, register pending call, spawn Modal `process_call.spawn(...)`, return TwiML | ~2-3h, ~200 lines |
+| **Backend deployed to public URL** (so Modal can reach it): ngrok for dev, Modal CPU / Render for prod | ~30min |
+| **Twilio Console webhook URL** pointed at backend `/twilio/voice` | 5min |
+| **First end-to-end test call** — debug whatever blows up | unknown, 30min-half-day |
+| **Modal `CLIO_DEMO_MODE=1` redeploy** before judging | 1 command |
+
+### 🚧 Not yet written (demo polish, not blocking)
+| Component | Notes |
+|---|---|
+| **ReadbackOutcome** detection — pattern-match caller's response after a Sarah read-back into confirmed/corrected/unclear | ~80 lines in `process_call`'s post-readback logic |
+| **Rescue clip pipeline** — pre-record 6-10 PersonaPlex-voice WAVs, server-side audio gating during playback | ~50 lines + recording session |
+| **Twilio TwiML `<Say>` preamble** — "Thank you for calling Allianz, please hold" while Modal warms up | included with Twilio webhook handler |
+| **Frontend monitoring UI** — Next.js orb + transcript stream + FNOL state | demo can run from terminal logs alone |
+| **Tools** (synthetic dialogue gen, eval runner) | not on critical path |
+| **Scribe v2 ASR side-channel** (Step 4b) — entity verification backchannel; deferred because read-back protocol covers entity recall already | re-evaluate after first real call |
 
 ## Repo layout
 
@@ -64,20 +103,24 @@ Clio/
 ├── .entire/                    Entire CLI (auto AI-session capture on git push)
 │
 ├── backend/
-│   └── app/
-│       ├── reasoner/           FNOL state machine (CPU)
-│       │   ├── schema.py       Pydantic — PolicyContext, ClaimReport, FNOLSession
-│       │   ├── taxonomy.py     enums (IncidentType, ReporterRole, KaskoType, ...)
-│       │   ├── db.py           mock_policies.json lookup, < 5μs
-│       │   ├── persona.py      Sarah BASE_PERSONA + session_system_prompt(now=)
-│       │   ├── extractor.py    Anthropic Haiku tool-use slot extractor
-│       │   ├── state.py        Session lifecycle + auth + readback merge logic
-│       │   ├── drip.py         control-plane directive types (Pydantic)
-│       │   └── gate.py         3 intervention triggers (readback, compliance, wrap-up)
-│       └── control/
-│           ├── messages.py     WS wire types (re-exports drip directives)
-│           ├── orchestrator.py CallOrchestrator — bridges WS ↔ reasoner.Session
-│           └── server.py       FastAPI app with /control/{call_id} WS endpoint
+│   ├── app/
+│   │   ├── reasoner/           FNOL state machine (CPU)
+│   │   │   ├── schema.py       Pydantic — PolicyContext, ClaimReport, FNOLSession
+│   │   │   ├── taxonomy.py     enums (IncidentType, ReporterRole, KaskoType, ...)
+│   │   │   ├── db.py           mock_policies.json lookup, < 5μs
+│   │   │   ├── persona.py      Sarah BASE_PERSONA + session_system_prompt(now=)
+│   │   │   ├── extractor.py    Anthropic Haiku tool-use slot extractor
+│   │   │   ├── state.py        Session lifecycle + auth + readback merge logic
+│   │   │   ├── drip.py         control-plane directive types (Pydantic)
+│   │   │   └── gate.py         3 intervention triggers (readback, compliance, wrap-up)
+│   │   ├── control/
+│   │   │   ├── messages.py     WS wire types (re-exports drip directives)
+│   │   │   ├── orchestrator.py CallOrchestrator — bridges WS ↔ reasoner.Session
+│   │   │   └── server.py       FastAPI app with /control/{call_id} WS endpoint
+│   │   └── telephony/          (NOT YET WRITTEN — Twilio webhook handler goes here)
+│   └── tests/
+│       ├── conftest.py         loads .env so SlotExtractor can init
+│       └── test_control_orchestrator.py  6 tests pass
 │
 ├── model_service/              SEPARATE uv project (heavy GPU deps)
 │   ├── pyproject.toml
@@ -86,8 +129,18 @@ Clio/
 │   │   ├── talker.py           Talker Protocol + MockTalker + PersonaPlexTalker stub
 │   │   ├── session.py          per-call orchestrator with drip-feed
 │   │   └── main.py             websockets server entry
+│   ├── tests/
+│   │   └── test_mock_session.py  5 tests, all pass
 │   └── deploy/
-│       └── modal_app.py        Modal class — A100, image, setup(), process_call()
+│       └── modal_app.py        Modal class — A100, image, setup() (verified live),
+│                               process_call() with steps 1-3 + 4a + 5 + 6 wired in:
+│                                  - control WS handshake
+│                                  - LiveKit room join + agent track publish
+│                                  - persona priming (voice + system prompt)
+│                                  - per-frame Mimi.encode → LMGen.step → Mimi.decode
+│                                  - DripState consumed for forced text_token
+│                                  - background WS receiver for ReasonerDirective updates
+│                                  - energy-VAD turn boundary signaling
 │
 ├── frontend/                   Next.js (not started)
 ├── data/
