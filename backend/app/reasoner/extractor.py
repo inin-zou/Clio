@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import json
 import os
+import types
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Union, get_args, get_origin
 
 from anthropic import AsyncAnthropic
 from pydantic import BaseModel, Field
@@ -33,6 +34,46 @@ from .schema import (
     ReadbackEvent,
     TranscriptTurn,
 )
+
+
+# ─── Build a flat list of valid slot paths from the ClaimReport schema ──────
+# Done once at import time. Haiku gets this list verbatim so it doesn't
+# invent slot paths that ClaimReport.model_validate() would reject.
+
+def _enumerate_paths(
+    model_cls: type[BaseModel],
+    prefix: str = "",
+    seen: set[type] | None = None,
+) -> list[str]:
+    """Recursively walk a Pydantic model's fields. Returns dotted paths to
+    every leaf field, plus the model-typed field itself for cases where the
+    extractor wants to set the whole sub-object at once.
+    """
+    seen = seen or set()
+    paths: list[str] = []
+
+    for name, field in model_cls.model_fields.items():
+        path = f"{prefix}.{name}" if prefix else name
+        annot = field.annotation
+        # Unwrap X | None and Optional[X] to the inner type
+        origin = get_origin(annot)
+        if origin is Union or origin is types.UnionType:
+            non_none = [a for a in get_args(annot) if a is not type(None)]
+            if len(non_none) == 1:
+                annot = non_none[0]
+
+        # Recurse into nested BaseModels (e.g. OtherParty, VehicleDamage)
+        if isinstance(annot, type) and issubclass(annot, BaseModel) and annot not in seen:
+            seen2 = seen | {annot}
+            paths.extend(_enumerate_paths(annot, prefix=path, seen=seen2))
+            paths.append(path)  # also allow setting the whole sub-object
+        else:
+            paths.append(path)
+
+    return paths
+
+
+VALID_SLOT_PATHS: list[str] = _enumerate_paths(ClaimReport)
 
 
 HAIKU_MODEL = "claude-haiku-4-5-20251001"
@@ -67,6 +108,20 @@ update the slot.
 
 6. Don't try to fill EVERY field every turn. Only update what's new in this \
 turn's transcript. If nothing relevant was said, return an empty update.
+
+7. CRITICAL — slot_path values you return must match the schema EXACTLY. \
+Use only the dotted paths listed in the "## Valid slot paths" section of \
+the user message. Do not invent path names. If the caller mentions something \
+that doesn't fit any valid slot path, omit it.
+
+8. Use the controlled vocabularies for enum-typed fields (e.g. incident_type \
+must be one of: collision, stationary, parking, wildlife, animal, \
+property_only, personal_injury). Map the caller's wording to the closest \
+enum value.
+
+9. Datetime fields take ISO 8601 strings with timezone (e.g. \
+"2026-04-25T08:30:00+02:00"). Use the "Current time" provided in the user \
+message to resolve relative references.
 
 Return a JSON object containing only the fields that should be UPDATED, plus \
 a `reasoning` field explaining your decisions briefly.
@@ -204,6 +259,12 @@ class SlotExtractor:
                 f"Use this to resolve phrases like 'this morning', "
                 f"'yesterday', 'an hour ago' into concrete ISO datetimes."
             )
+
+        # 0b. Valid slot paths — Haiku must use one of these exactly.
+        parts.append(
+            "## Valid slot paths (use EXACTLY these in slot_path; do not invent)\n"
+            + "\n".join(f"- {p}" for p in VALID_SLOT_PATHS)
+        )
 
         # 1. What we already know from the DB (so extractor doesn't try to fill these)
         if policy_context is not None:
