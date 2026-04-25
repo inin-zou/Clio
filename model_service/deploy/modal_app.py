@@ -147,6 +147,7 @@ class PersonaPlexService:
     other_mimi: object = None
     tokenizer: object = None
     frame_size: int = 0
+    voices_dir: str = ""
 
     @modal.enter()
     def setup(self) -> None:
@@ -245,6 +246,27 @@ class PersonaPlexService:
         torch.cuda.synchronize()
         print(f"[setup]   warmup done ({time.perf_counter() - t0:.1f}s)", flush=True)
 
+        # ─── Voice prompts ──────────────────────────────────────────
+        # NVIDIA ships voice prompt embeddings (NATF1.pt etc.) as voices.tgz
+        # on the HF repo. Cached on hf_cache_vol so it's a no-op redownload.
+        print("[setup] fetching voice prompts...", flush=True)
+        t0 = time.perf_counter()
+        import tarfile
+        from pathlib import Path
+
+        voices_tgz = hf_hub_download(repo, "voices.tgz")
+        voices_dir = Path(voices_tgz).parent / "voices"
+        if not voices_dir.exists():
+            with tarfile.open(voices_tgz, "r:gz") as tar:
+                tar.extractall(path=voices_dir.parent)
+        if not voices_dir.exists():
+            raise RuntimeError("voices.tgz did not contain a 'voices/' directory")
+        self.voices_dir = str(voices_dir)
+        available_voices = sorted(p.stem for p in voices_dir.glob("*.pt"))
+        print(f"[setup]   voices ready ({time.perf_counter() - t0:.1f}s) — "
+              f"{len(available_voices)} prompts: {available_voices[:6]}...",
+              flush=True)
+
         print(
             f"[setup] PersonaPlex ready — total {time.perf_counter() - t_start:.1f}s",
             flush=True,
@@ -260,16 +282,16 @@ class PersonaPlexService:
     ) -> dict:
         """Handle one inbound call. Long-running (call duration up to 1h).
 
-        Step 1-3 implementation: control-plane WS handshake + LiveKit room
-        join + audio echo (caller audio passed straight back to validate
-        the wiring). PersonaPlex inference and Reasoner-driven injection
-        come in subsequent steps.
+        Step 4a implementation: control WS + LiveKit room + Sarah persona
+        priming + per-frame PersonaPlex inference (no Reasoner-driven
+        injection yet — that's Step 5; no VAD turn-boundary detection —
+        Step 6). Caller audio flows through Mimi.encode → LMGen.step →
+        Mimi.decode → LiveKit; agent text tokens are pushed to backend
+        over the control WS.
 
         Args:
-            call_id: matches the path the WS will be served at on backend
-                (`{backend_control_url}/control/{call_id}`).
-            livekit_room: LiveKit room name (one per call). Logged but not
-                used directly; the agent_token is what authorizes the join.
+            call_id: WS path will be `{backend_control_url}/control/{call_id}`.
+            livekit_room: LiveKit room name (logged; agent_token authorises join).
             livekit_agent_token: signed JWT for joining the room as agent.
             backend_control_url: backend base URL, e.g. wss://abc.ngrok.app.
 
@@ -281,7 +303,11 @@ class PersonaPlexService:
         import logging
         import os
         import time
+        from datetime import datetime, timezone
+        from pathlib import Path
 
+        import numpy as np
+        import torch
         import websockets
         from livekit import rtc
 
@@ -290,8 +316,10 @@ class PersonaPlexService:
 
         livekit_url = os.environ.get("LIVEKIT_URL")
         if not livekit_url:
-            logger.error("LIVEKIT_URL not set in Modal secrets")
             return {"ok": False, "error": "LIVEKIT_URL not set"}
+
+        if self.lm_gen is None:
+            return {"ok": False, "error": "PersonaPlex not loaded (setup() failed?)"}
 
         ws_url = f"{backend_control_url.rstrip('/')}/control/{call_id}"
         t_call_started = time.perf_counter()
@@ -300,14 +328,10 @@ class PersonaPlexService:
 
         try:
             async with websockets.connect(ws_url, max_size=2**20) as ws:
-                logger.info("call %s: control WS connected to %s", call_id, ws_url)
+                logger.info("call %s: control WS connected", call_id)
 
-                # ─── Step 1: receive SessionStart from backend ─────────
-                try:
-                    raw = await asyncio.wait_for(ws.recv(), timeout=10)
-                except asyncio.TimeoutError:
-                    return {"ok": False, "error": "timeout waiting for SessionStart"}
-
+                # ─── 1. Receive SessionStart ──────────────────────────
+                raw = await asyncio.wait_for(ws.recv(), timeout=10)
                 session_start = json.loads(raw)
                 if session_start.get("type") != "session_start":
                     return {
@@ -317,48 +341,61 @@ class PersonaPlexService:
                 system_prompt = session_start["system_prompt"]
                 voice_prompt_id = session_start["voice_prompt_id"]
                 logger.info(
-                    "call %s: SessionStart received (voice=%s, prompt %d chars)",
+                    "call %s: SessionStart (voice=%s, prompt=%d chars)",
                     call_id, voice_prompt_id, len(system_prompt),
                 )
 
-                # ─── Step 2: join LiveKit room ─────────────────────────
+                # ─── 2. Prime PersonaPlex with persona + voice prompt ─
+                # Mirrors personaplex/offline.py:241-256. The voice prompt
+                # injects target vocal characteristics; the system prompt
+                # sets role/tone via the text monologue stream.
+                t0 = time.perf_counter()
+                voice_path = Path(self.voices_dir) / f"{voice_prompt_id}.pt"
+                if not voice_path.exists():
+                    return {
+                        "ok": False,
+                        "error": f"voice prompt {voice_prompt_id} not found in {self.voices_dir}",
+                    }
+
+                wrapped_prompt = _wrap_with_system_tags(system_prompt)
+                self.lm_gen.load_voice_prompt_embeddings(str(voice_path))
+                self.lm_gen.text_prompt_tokens = self.tokenizer.encode(wrapped_prompt)
+
+                self.mimi.reset_streaming()
+                self.other_mimi.reset_streaming()
+                self.lm_gen.reset_streaming()
+                self.lm_gen.step_system_prompts(self.mimi)
+                self.mimi.reset_streaming()
+                logger.info(
+                    "call %s: persona primed in %.1fs",
+                    call_id, time.perf_counter() - t0,
+                )
+
+                # ─── 3. Join LiveKit room ──────────────────────────────
                 room = rtc.Room()
-                caller_audio_track: rtc.RemoteAudioTrack | None = None
-                track_subscribed = asyncio.Event()
+                caller_track: rtc.RemoteAudioTrack | None = None
+                track_event = asyncio.Event()
 
                 @room.on("track_subscribed")
-                def _on_track(
-                    track: rtc.Track,
-                    publication: rtc.RemoteTrackPublication,
-                    participant: rtc.RemoteParticipant,
-                ) -> None:
-                    nonlocal caller_audio_track
-                    if track.kind == rtc.TrackKind.KIND_AUDIO and caller_audio_track is None:
-                        caller_audio_track = track
-                        track_subscribed.set()
+                def _on_track(track, publication, participant):
+                    nonlocal caller_track
+                    if track.kind == rtc.TrackKind.KIND_AUDIO and caller_track is None:
+                        caller_track = track
+                        track_event.set()
                         logger.info(
-                            "call %s: subscribed to caller audio (participant=%s)",
+                            "call %s: caller audio subscribed (id=%s)",
                             call_id, participant.identity,
                         )
 
-                @room.on("disconnected")
-                def _on_disconnect() -> None:
-                    logger.info("call %s: room disconnected", call_id)
-
                 await room.connect(livekit_url, livekit_agent_token)
-                logger.info("call %s: joined LiveKit room %s as agent", call_id, livekit_room)
+                logger.info("call %s: joined LiveKit room", call_id)
 
-                # ─── Step 3: publish our agent audio track ─────────────
-                # 24kHz mono — matches Mimi codec output. PersonaPlex frames
-                # written to this source will reach the caller via WebRTC.
                 audio_source = rtc.AudioSource(sample_rate=24000, num_channels=1)
                 agent_track = rtc.LocalAudioTrack.create_audio_track(
                     "sarah-agent-audio", audio_source
                 )
                 await room.local_participant.publish_track(agent_track)
-                logger.info("call %s: published agent audio track", call_id)
 
-                # Backend can now safely start sending directives.
                 cold_start = time.perf_counter() - t_call_started
                 await ws.send(json.dumps({
                     "type": "session_ready",
@@ -366,46 +403,86 @@ class PersonaPlexService:
                     "voice_prompt_id": voice_prompt_id,
                     "cold_start_seconds": cold_start,
                 }))
-                logger.info("call %s: SessionReady sent (%.2fs)", call_id, cold_start)
+                logger.info("call %s: SessionReady (%.2fs)", call_id, cold_start)
 
-                # Wait for caller audio (Twilio SIP trunk publishes it after
-                # the call connects). 30s grace.
                 try:
-                    await asyncio.wait_for(track_subscribed.wait(), timeout=30)
+                    await asyncio.wait_for(track_event.wait(), timeout=30)
                 except asyncio.TimeoutError:
-                    logger.error("call %s: timed out waiting for caller audio track", call_id)
                     return {"ok": False, "error": "no caller audio track within 30s"}
 
-                # ─── Step 1-3 validation: echo loop ────────────────────
-                # For now we just pass caller audio back to the room. Once
-                # this works end-to-end, Step 4a swaps the echo for
-                # Mimi.encode → lm_gen.step → Mimi.decode.
-                logger.info("call %s: starting echo loop (Step 1-3 validation)", call_id)
+                # ─── 4. Per-frame inference loop ──────────────────────
+                # Mimi expects 80ms (1920 samples at 24kHz) chunks. LiveKit
+                # may deliver smaller frames, so we buffer up to frame_size.
+                logger.info("call %s: starting PersonaPlex inference loop", call_id)
                 audio_stream = rtc.AudioStream(
-                    caller_audio_track, sample_rate=24000, num_channels=1
+                    caller_track, sample_rate=24000, num_channels=1
                 )
+                buffer = np.empty(0, dtype=np.float32)
 
                 async for event in audio_stream:
-                    await audio_source.capture_frame(event.frame)
-                    frame_count += 1
-                    if frame_count == 1:
-                        logger.info(
-                            "call %s: first audio frame received "
-                            "(samples=%d, rate=%dHz)",
-                            call_id, event.frame.samples_per_channel,
-                            event.frame.sample_rate,
-                        )
-                    if frame_count % 250 == 0:  # ~20s at 12.5Hz
-                        elapsed = time.perf_counter() - t_call_started
-                        logger.debug(
-                            "call %s: echoed %d frames (%.1fs elapsed)",
-                            call_id, frame_count, elapsed,
-                        )
+                    incoming = _audioframe_to_float32(event.frame)
+                    buffer = np.concatenate([buffer, incoming])
 
-                logger.info("call %s: audio stream ended after %d frames",
-                            call_id, frame_count)
+                    # Drain whole 80ms chunks; tail of <1920 samples waits.
+                    while buffer.shape[0] >= self.frame_size:
+                        chunk = buffer[: self.frame_size]
+                        buffer = buffer[self.frame_size :]
 
-                # ─── Cleanup ──────────────────────────────────────────
+                        # Mimi.encode wants [B, channels, T] float32 on cuda
+                        chunk_t = torch.from_numpy(chunk).to(
+                            device="cuda", dtype=torch.float32
+                        ).reshape(1, 1, -1)
+                        user_codes = self.mimi.encode(chunk_t)
+
+                        # LMGen.step — no forced text_token yet (Step 5 plugs in)
+                        for c in range(user_codes.shape[-1]):
+                            tokens = self.lm_gen.step(user_codes[:, :, c : c + 1])
+                            if tokens is None:
+                                continue
+
+                            # Decode agent audio (Mimi codes 1..8 = audio)
+                            agent_pcm_t = self.mimi.decode(tokens[:, 1:9])
+                            agent_pcm_np = agent_pcm_t.detach().cpu().numpy()[0, 0]
+
+                            # Push to LiveKit as int16 PCM
+                            agent_int16 = _float32_to_int16(agent_pcm_np)
+                            out_frame = rtc.AudioFrame(
+                                data=agent_int16.tobytes(),
+                                sample_rate=24000,
+                                num_channels=1,
+                                samples_per_channel=len(agent_int16),
+                            )
+                            await audio_source.capture_frame(out_frame)
+
+                            # Push transcript token to backend
+                            text_token_id = int(tokens[0, 0, 0].item())
+                            text = _decode_text_token(self.tokenizer, text_token_id)
+                            if text_token_id != 3:  # skip PAD spam
+                                try:
+                                    await ws.send(json.dumps({
+                                        "type": "transcript",
+                                        "call_id": call_id,
+                                        "role": "agent",
+                                        "text": text,
+                                        "source": "personaplex",
+                                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                                    }))
+                                except websockets.exceptions.ConnectionClosed:
+                                    logger.warning("call %s: backend WS closed mid-call", call_id)
+                                    break
+
+                            frame_count += 1
+                            if frame_count == 1:
+                                logger.info(
+                                    "call %s: first PersonaPlex frame produced (cold→warm transition)",
+                                    call_id,
+                                )
+
+                logger.info(
+                    "call %s: inference loop ended after %d frames (%.1fs)",
+                    call_id, frame_count, time.perf_counter() - t_call_started,
+                )
+
                 await ws.send(json.dumps({
                     "type": "session_closed",
                     "call_id": call_id,
@@ -414,14 +491,10 @@ class PersonaPlexService:
                 }))
 
         except websockets.exceptions.ConnectionClosed as e:
-            logger.warning("call %s: control WS closed unexpectedly: %s", call_id, e)
+            logger.warning("call %s: control WS closed: %s", call_id, e)
         except Exception as e:
             logger.exception("call %s: process_call crashed: %s", call_id, e)
-            return {
-                "ok": False,
-                "error": str(e),
-                "frame_count": frame_count,
-            }
+            return {"ok": False, "error": str(e), "frame_count": frame_count}
         finally:
             if room is not None:
                 try:
@@ -445,6 +518,46 @@ class PersonaPlexService:
             "model_loaded": self.lm_gen is not None,
             "demo_mode": DEMO_MODE,
         }
+
+
+# ─── Per-frame helpers ───────────────────────────────────────────────────────
+# These run inside the Modal container, so they can assume torch/numpy are
+# available. Kept at module level so process_call() stays readable.
+
+
+def _wrap_with_system_tags(text: str) -> str:
+    """PersonaPlex expects system prompt wrapped in <system>...<system>.
+    Mirrors personaplex/offline.py:wrap_with_system_tags."""
+    cleaned = text.strip()
+    if cleaned.startswith("<system>") and cleaned.endswith("<system>"):
+        return cleaned
+    return f"<system> {cleaned} <system>"
+
+
+def _audioframe_to_float32(frame) -> "numpy.ndarray":
+    """LiveKit AudioFrame (int16) → float32 numpy in [-1, 1]."""
+    import numpy as np
+
+    int16 = np.frombuffer(frame.data, dtype=np.int16)
+    return int16.astype(np.float32) / 32768.0
+
+
+def _float32_to_int16(arr) -> "numpy.ndarray":
+    """float32 PCM in [-1, 1] → int16 numpy. Clamps before quantizing."""
+    import numpy as np
+
+    clipped = np.clip(arr, -1.0, 1.0)
+    return (clipped * 32767.0).astype(np.int16)
+
+
+def _decode_text_token(tokenizer, token_id: int) -> str:
+    """Map a text token id to its display string. Special-cases the four
+    control tokens (EPAD/BOS/EOS/PAD) per personaplex/offline.py:293."""
+    SPECIAL = {0: "EPAD", 1: "BOS", 2: "EOS", 3: "PAD"}
+    if token_id in SPECIAL:
+        return SPECIAL[token_id]
+    piece = tokenizer.id_to_piece(token_id)
+    return piece.replace("▁", " ")  # SentencePiece word-boundary marker
 
 
 # ─── CLI helpers ─────────────────────────────────────────────────────────────
