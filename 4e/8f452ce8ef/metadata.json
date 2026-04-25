@@ -1,0 +1,30 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "4e8f452ce8ef",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 0,
+  "files_touched": [
+    "backend/app/control/messages.py",
+    "backend/app/control/orchestrator.py",
+    "backend/app/control/server.py",
+    "backend/tests/__init__.py",
+    "backend/tests/conftest.py",
+    "backend/tests/test_control_orchestrator.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4e/8f452ce8ef/0/metadata.json",
+      "transcript": "/4e/8f452ce8ef/0/full.jsonl",
+      "content_hash": "/4e/8f452ce8ef/0/content_hash.txt",
+      "prompt": "/4e/8f452ce8ef/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 24,
+    "cache_creation_tokens": 28490,
+    "cache_read_tokens": 10614888,
+    "output_tokens": 25637,
+    "api_call_count": 14
+  }
+}
