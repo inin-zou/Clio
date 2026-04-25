@@ -1,0 +1,46 @@
+interface-first, 实际推理放到 Modal， 因为本地apple芯片跑不了
+
+---
+
+我希望livekit结束后写上去，因为这样子websocket一定会有很高的latency所以也没什么用
+
+---
+
+等一下，LiveKit Agent + PersonaPlex 会使inbound call latency最低吗
+
+---
+
+只是 a priori 怀疑
+
+---
+
+ok，帮我验真下我们modal cli，但是我们现在还是要先把livekit弄好对吧？但是livekit在livekit cloud or modal?
+
+---
+
+我们已经都把.env填好了，但是因为都是user打到我们的号码，我们怎么在这之前做好warmup？你有什么建议吗
+
+---
+
+HF weights 缓存 + 方案 A: keep_warm=1 永远预热，但我觉得也可以+一段hold music while loading（肯定多少都有点延迟）
+
+---
+
+HF weights 缓存 + 方案 A: keep_warm=1 永远预热，但我觉得也可以+一段hold music while loading（肯定多少都有点延迟）
+我会手动stop container，so it will be fine, only keep it up when we about to demo and get evalutated?
+
+---
+
+ok的
+
+---
+
+ok的，之前modal部署的代码在/Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Inca
+
+---
+
+但你确定a10g够用？
+
+---
+
+A100 40GB吧
