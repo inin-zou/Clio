@@ -410,9 +410,73 @@ class PersonaPlexService:
                 except asyncio.TimeoutError:
                     return {"ok": False, "error": "no caller audio track within 30s"}
 
-                # ─── 4. Per-frame inference loop ──────────────────────
-                # Mimi expects 80ms (1920 samples at 24kHz) chunks. LiveKit
-                # may deliver smaller frames, so we buffer up to frame_size.
+                # ─── 4-6. Per-frame inference loop + directives + VAD ──
+                # Drip state — mutated by the directive receiver task,
+                # consumed by the inference loop one frame at a time.
+                drip = DripState()
+                vad = TurnBoundaryDetector()
+                directive_count = 0
+                turn_boundary_count = 0
+
+                async def receive_directives() -> None:
+                    """Background task: parse incoming WS messages and
+                    update drip state. Runs concurrent with the audio loop."""
+                    nonlocal directive_count
+                    try:
+                        async for raw in ws:
+                            try:
+                                msg = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            mtype = msg.get("type")
+                            if mtype == "speak":
+                                # Tokenize the text content (no <system> tags
+                                # — those are init-time only). Drip-feed
+                                # leads with EPAD inside DripState.force_speak.
+                                content_tokens = self.tokenizer.encode(msg["text"])
+                                drip.force_speak(
+                                    token_ids=content_tokens,
+                                    after_release=msg.get("after_release", "resume"),
+                                )
+                                directive_count += 1
+                                logger.info(
+                                    "call %s: speak directive — %d tokens (reason=%s)",
+                                    call_id, len(content_tokens),
+                                    msg.get("reason", ""),
+                                )
+                            elif mtype == "silent":
+                                drip.force_silence(msg["duration_frames"])
+                                directive_count += 1
+                                logger.info(
+                                    "call %s: silent directive — %d frames",
+                                    call_id, msg["duration_frames"],
+                                )
+                            elif mtype == "release":
+                                drip.force_release()
+                                directive_count += 1
+                                logger.info("call %s: release directive", call_id)
+                            elif mtype == "load_policy_context":
+                                # Modal doesn't act on this directly — backend
+                                # uses subsequent SpeakDirectives to surface
+                                # the brief into Sarah's monologue stream.
+                                logger.info(
+                                    "call %s: policy_context loaded (%d chars)",
+                                    call_id, len(msg.get("policy_brief", "")),
+                                )
+                            elif mtype == "rescue_clip":
+                                # TODO: server-side audio mute + WAV stream.
+                                logger.warning(
+                                    "call %s: rescue_clip not yet implemented (clip=%s)",
+                                    call_id, msg.get("clip_id"),
+                                )
+                            elif mtype == "session_end":
+                                logger.info("call %s: backend requested end", call_id)
+                                return
+                    except websockets.exceptions.ConnectionClosed:
+                        logger.warning("call %s: directive WS closed", call_id)
+
+                directive_task = asyncio.create_task(receive_directives())
+
                 logger.info("call %s: starting PersonaPlex inference loop", call_id)
                 audio_stream = rtc.AudioStream(
                     caller_track, sample_rate=24000, num_channels=1
@@ -428,15 +492,42 @@ class PersonaPlexService:
                         chunk = buffer[: self.frame_size]
                         buffer = buffer[self.frame_size :]
 
+                        # VAD: detect caller turn boundary before encoding.
+                        # If True, the caller just finished speaking — push
+                        # event to backend so the slot extractor runs.
+                        if vad.update(chunk):
+                            turn_boundary_count += 1
+                            try:
+                                await ws.send(json.dumps({
+                                    "type": "caller_turn_boundary",
+                                    "call_id": call_id,
+                                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                                }))
+                                logger.info(
+                                    "call %s: caller turn boundary #%d",
+                                    call_id, turn_boundary_count,
+                                )
+                            except websockets.exceptions.ConnectionClosed:
+                                pass
+
                         # Mimi.encode wants [B, channels, T] float32 on cuda
                         chunk_t = torch.from_numpy(chunk).to(
                             device="cuda", dtype=torch.float32
                         ).reshape(1, 1, -1)
                         user_codes = self.mimi.encode(chunk_t)
 
-                        # LMGen.step — no forced text_token yet (Step 5 plugs in)
+                        # LMGen.step — feed forced text_token from drip state
                         for c in range(user_codes.shape[-1]):
-                            tokens = self.lm_gen.step(user_codes[:, :, c : c + 1])
+                            forced_id = drip.next_forced_token()
+                            forced_tensor = (
+                                torch.tensor([forced_id], device="cuda", dtype=torch.long)
+                                if forced_id is not None
+                                else None
+                            )
+                            tokens = self.lm_gen.step(
+                                input_tokens=user_codes[:, :, c : c + 1],
+                                text_token=forced_tensor,
+                            )
                             if tokens is None:
                                 continue
 
@@ -456,8 +547,8 @@ class PersonaPlexService:
 
                             # Push transcript token to backend
                             text_token_id = int(tokens[0, 0, 0].item())
-                            text = _decode_text_token(self.tokenizer, text_token_id)
-                            if text_token_id != 3:  # skip PAD spam
+                            if text_token_id != PAD_TOKEN_ID:  # skip PAD spam
+                                text = _decode_text_token(self.tokenizer, text_token_id)
                                 try:
                                     await ws.send(json.dumps({
                                         "type": "transcript",
@@ -474,9 +565,16 @@ class PersonaPlexService:
                             frame_count += 1
                             if frame_count == 1:
                                 logger.info(
-                                    "call %s: first PersonaPlex frame produced (cold→warm transition)",
+                                    "call %s: first PersonaPlex frame produced",
                                     call_id,
                                 )
+
+                # Cancel the directive receiver before tearing down
+                directive_task.cancel()
+                try:
+                    await directive_task
+                except asyncio.CancelledError:
+                    pass
 
                 logger.info(
                     "call %s: inference loop ended after %d frames (%.1fs)",
@@ -558,6 +656,121 @@ def _decode_text_token(tokenizer, token_id: int) -> str:
         return SPECIAL[token_id]
     piece = tokenizer.id_to_piece(token_id)
     return piece.replace("▁", " ")  # SentencePiece word-boundary marker
+
+
+# Special token ids (mirror personaplex/offline.py:293)
+EPAD_TOKEN_ID = 0
+BOS_TOKEN_ID = 1
+EOS_TOKEN_ID = 2
+PAD_TOKEN_ID = 3
+
+
+# ─── Caller turn boundary detection ─────────────────────────────────────────
+# Energy-based VAD with hysteresis. Fires when the caller has been silent
+# for `SILENCE_FRAMES_FOR_BOUNDARY` consecutive frames AFTER having spoken.
+# Backend's orchestrator uses this to trigger the slot extractor.
+#
+# Tuning: 12.5 Hz frame rate × 10 frames = 800ms of silence before we
+# consider a turn complete. Real claims callers pause-think for 1-3s, so
+# 800ms is a tight but reasonable boundary. Bump SILENCE_FRAMES_FOR_BOUNDARY
+# if extractor fires too eagerly mid-thought.
+RMS_SILENCE_THRESHOLD = 0.005       # below this is "silent"
+SILENCE_FRAMES_FOR_BOUNDARY = 10    # 10 × 80ms = 800ms
+SPEECH_FRAMES_FOR_TURN_START = 2    # debounce — 160ms above threshold to count
+
+
+class TurnBoundaryDetector:
+    """Tracks caller speech state and fires a turn-boundary callback when
+    the caller transitions from speaking → silent for the threshold duration."""
+
+    def __init__(self) -> None:
+        self.consecutive_silent = 0
+        self.consecutive_speech = 0
+        self.is_speaking = False
+        self.turn_in_progress = False  # caller said anything since last boundary?
+
+    def update(self, chunk_float32) -> bool:
+        """Feed one 80ms chunk of caller PCM. Returns True if a turn boundary
+        just fired (caller stopped speaking)."""
+        import numpy as np
+
+        rms = float(np.sqrt(np.mean(chunk_float32 ** 2)))
+
+        if rms > RMS_SILENCE_THRESHOLD:
+            # Caller is producing audio above noise floor
+            self.consecutive_silent = 0
+            self.consecutive_speech += 1
+            if self.consecutive_speech >= SPEECH_FRAMES_FOR_TURN_START:
+                self.is_speaking = True
+                self.turn_in_progress = True
+            return False
+
+        # Below threshold = silence
+        self.consecutive_speech = 0
+        self.consecutive_silent += 1
+
+        if (
+            self.is_speaking
+            and self.turn_in_progress
+            and self.consecutive_silent >= SILENCE_FRAMES_FOR_BOUNDARY
+        ):
+            self.is_speaking = False
+            self.turn_in_progress = False
+            return True
+        return False
+
+
+class DripState:
+    """Per-call queue of forced text tokens for the per-frame loop to consume.
+
+    The control-plane WS receiver mutates this state as ReasonerDirectives
+    arrive. The per-frame loop calls next_forced_token() each frame and
+    passes the result (or None for free sampling) to LMGen.step.
+
+    Concurrent access: backend directives arrive on a separate asyncio task
+    from the inference loop, but Python's GIL plus the simple deque ops
+    make this safe without explicit locking. If we ever multi-thread, wrap
+    with asyncio.Lock.
+    """
+
+    def __init__(self) -> None:
+        from collections import deque
+
+        self.queue: "deque[int]" = deque()
+        self.after_release: str = "resume"
+        self.silent_frames_remaining: int = 0
+
+    def force_speak(self, token_ids: list[int], after_release: str = "resume") -> None:
+        """SpeakDirective handler. Always lead with EPAD to break out of
+        any active PAD state."""
+        self.queue.clear()
+        self.queue.append(EPAD_TOKEN_ID)
+        self.queue.extend(token_ids)
+        self.after_release = after_release
+        self.silent_frames_remaining = 0
+
+    def force_silence(self, frames: int) -> None:
+        """SilenceDirective handler. Holds PAD for N frames."""
+        self.queue.clear()
+        self.silent_frames_remaining = max(0, int(frames))
+
+    def force_release(self) -> None:
+        """ReleaseDirective handler. Cancel any active override."""
+        self.queue.clear()
+        self.silent_frames_remaining = 0
+        self.after_release = "resume"
+
+    def next_forced_token(self) -> int | None:
+        """One frame ticks here. Returns the token to force, or None to
+        let LMGen sample freely."""
+        if self.silent_frames_remaining > 0:
+            self.silent_frames_remaining -= 1
+            return PAD_TOKEN_ID
+        if self.queue:
+            return self.queue.popleft()
+        if self.after_release == "silent":
+            return PAD_TOKEN_ID
+        return None
 
 
 # ─── CLI helpers ─────────────────────────────────────────────────────────────
