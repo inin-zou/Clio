@@ -1,0 +1,54 @@
+[project]
+name = "clio-model-service"
+version = "0.1.0"
+description = "PersonaPlex inference + Reasoner-driven text_token injection"
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Interface-only deps. Run locally to develop the WS protocol against a MockTalker.
+dependencies = [
+    "pydantic>=2.10",
+    "python-dotenv>=1.0",
+    "websockets>=13",
+    "numpy>=1.26",
+]
+
+[project.optional-dependencies]
+# Heavy GPU deps. Only installed in the Modal image; M-series Mac can't run
+# PersonaPlex inference even with CPU torch (model is 7B + Mimi codec).
+modal = [
+    "torch>=2.4",
+    "torchaudio>=2.4",
+    "sentencepiece>=0.2",
+    "sphn>=0.2",
+    "huggingface-hub>=0.26",
+    "accelerate>=1.0",
+    # PersonaPlex itself: install from NVIDIA's repo via pip in the Modal image
+    # ("pip install <github-url>/personaplex#subdirectory=moshi").
+    # Kept out of pyproject.toml because uv resolves git deps on every sync.
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["server"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
