@@ -144,33 +144,111 @@ class PersonaPlexService:
     # Filled in by @modal.enter. Never None during a method() call.
     lm_gen: object = None  # type: ignore[assignment]
     mimi: object = None
+    other_mimi: object = None
     tokenizer: object = None
+    frame_size: int = 0
 
     @modal.enter()
     def setup(self) -> None:
-        """Load PersonaPlex once per container start."""
-        import os
-        import sys
+        """Load PersonaPlex once per container start.
 
-        # Make /app/personaplex/moshi importable in case pip install
-        # didn't expose the right module names.
+        Mirrors personaplex/moshi/moshi/offline.py:189-256 boot sequence:
+          1. Load Mimi audio codec (×2 — caller + agent decoders)
+          2. Load SentencePiece text tokenizer
+          3. Load Moshi LM weights → GPU
+          4. Construct LMGen with streaming + sampling config
+          5. Enable streaming_forever() on all three
+          6. Warmup pass to compile CUDA graphs
+
+        Time on cached HF volume: ~30-40s.
+        """
+        import sys
+        import time
+
         sys.path.insert(0, "/app/personaplex/moshi")
 
+        import sentencepiece
+        import torch
+        from huggingface_hub import hf_hub_download
         from moshi.models import LMGen, loaders
 
-        print(f"[setup] loading Mimi codec...", flush=True)
-        mimi_weight = os.environ.get(
-            "MIMI_WEIGHT_PATH",
-            None,  # falls through to HF download (cached)
+        device = "cuda"
+        repo = loaders.DEFAULT_REPO  # PersonaPlex's NVIDIA fork sets this
+
+        t_start = time.perf_counter()
+
+        # Bumps the HF download counter for analytics (no-op on cached file).
+        hf_hub_download(repo, "config.json")
+
+        print(f"[setup] loading Mimi codec from {repo} ...", flush=True)
+        t0 = time.perf_counter()
+        mimi_weight = hf_hub_download(repo, loaders.MIMI_NAME)
+        self.mimi = loaders.get_mimi(mimi_weight, device)
+        # Second Mimi instance is used by PersonaPlex's offline path for the
+        # voice-prompt encoding side. Mirroring that here keeps the future
+        # voice-prompt loading code straightforward.
+        self.other_mimi = loaders.get_mimi(mimi_weight, device)
+        print(f"[setup]   mimi loaded ({time.perf_counter() - t0:.1f}s)", flush=True)
+
+        print("[setup] loading text tokenizer ...", flush=True)
+        t0 = time.perf_counter()
+        tokenizer_path = hf_hub_download(repo, loaders.TEXT_TOKENIZER_NAME)
+        self.tokenizer = sentencepiece.SentencePieceProcessor(tokenizer_path)
+        print(f"[setup]   tokenizer loaded ({time.perf_counter() - t0:.1f}s)", flush=True)
+
+        print("[setup] loading Moshi LM (this is the 7B weights)...", flush=True)
+        t0 = time.perf_counter()
+        moshi_weight = hf_hub_download(repo, loaders.MOSHI_NAME)
+        lm = loaders.get_moshi_lm(moshi_weight, device=device)
+        lm.eval()
+        print(f"[setup]   LM loaded to GPU ({time.perf_counter() - t0:.1f}s)", flush=True)
+
+        # 80 ms = 1920 samples at 24kHz.
+        self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
+
+        print("[setup] constructing LMGen ...", flush=True)
+        t0 = time.perf_counter()
+        self.lm_gen = LMGen(
+            lm,
+            audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),  # 0.5s spacer
+            sample_rate=self.mimi.sample_rate,
+            device=device,
+            frame_rate=self.mimi.frame_rate,
+            # Match the offline.py CLI defaults — these are reasonable for FNOL voice
+            use_sampling=True,
+            temp=0.8,
+            temp_text=0.7,
+            top_k=250,
+            top_k_text=25,
         )
-        # Mirror personaplex/offline.py:189-228 boot sequence.
-        # TODO(clio): fill in the actual loader calls once we run a first
-        # smoke test on Modal. Leaving as a clear shape for now.
-        # mimi = loaders.get_mimi(mimi_weight, device="cuda")
-        # tokenizer = ...
-        # lm = loaders.get_moshi_lm(...)
-        # self.lm_gen = LMGen(lm, ...)
-        print(f"[setup] PersonaPlex setup placeholder — not yet wired up", flush=True)
+        # Critical: tells the model + codec to maintain streaming KV cache /
+        # state across step() calls. Without this each step starts cold.
+        self.mimi.streaming_forever(1)
+        self.other_mimi.streaming_forever(1)
+        self.lm_gen.streaming_forever(1)
+        print(f"[setup]   LMGen ready ({time.perf_counter() - t0:.1f}s)", flush=True)
+
+        print("[setup] warmup pass (compiles CUDA graphs)...", flush=True)
+        t0 = time.perf_counter()
+        for _ in range(4):
+            chunk = torch.zeros(
+                1, 1, self.frame_size, dtype=torch.float32, device=device
+            )
+            codes = self.mimi.encode(chunk)
+            _ = self.other_mimi.encode(chunk)
+            for c in range(codes.shape[-1]):
+                tokens = self.lm_gen.step(codes[:, :, c : c + 1])
+                if tokens is None:
+                    continue
+                _ = self.mimi.decode(tokens[:, 1:9])
+                _ = self.other_mimi.decode(tokens[:, 1:9])
+        torch.cuda.synchronize()
+        print(f"[setup]   warmup done ({time.perf_counter() - t0:.1f}s)", flush=True)
+
+        print(
+            f"[setup] PersonaPlex ready — total {time.perf_counter() - t_start:.1f}s",
+            flush=True,
+        )
 
     @modal.method()
     async def join_call(

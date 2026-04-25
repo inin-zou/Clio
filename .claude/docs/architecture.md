@@ -18,7 +18,7 @@ The system is intentionally *boring* on infrastructure (LiveKit + Twilio + Modal
 |---|---|---|
 | PSTN ingress | **Twilio** (DID + SIP trunk) | Reliable, jurors call a real number, hackathon can pre-provision |
 | Real-time media | **LiveKit Cloud** | First-class SIP trunk integration, WebRTC infra, Agents framework with Python SDK |
-| Agent runtime | **LiveKit Agent (Python)** | Headless participant joins each room, owns the audio bridge + Reasoner |
+| Agent runtime | **LiveKit Agent (Python) co-located with PersonaPlex on Modal A100** | Audio never crosses backend; one network hop from LiveKit Cloud directly into the Modal container. Reasoner stays separate over control-plane WS. |
 | Voice model | **PersonaPlex 7B** off-the-shelf | Public injection API on `LMGen.step(text_token=...)`, no fine-tuning needed |
 | Model hosting | **Modal** (GPU) | Existing team experience, fast cold start, auto-scaling |
 | **Verification ASR** | **AssemblyAI Universal-3 Pro** (backchannel only) | Has the only published entity-recall benchmark (16.7% missed entity rate vs Deepgram Nova-3 25.2%). NOT primary transcript — see "Verification ASR backchannel" below |
@@ -29,6 +29,10 @@ The system is intentionally *boring* on infrastructure (LiveKit + Twilio + Modal
 
 ## Service boundaries (what runs where)
 
+**Critical design choice:** the LiveKit Agent and PersonaPlex 7B are **co-located on the same Modal A100 container**. Audio never traverses the model_service ↔ backend boundary — it goes LiveKit Cloud → Modal directly via WebRTC, then in-process Python calls into PersonaPlex. The backend Reasoner runs separately (CPU anywhere) and communicates only via a control-plane WebSocket carrying JSON directives (latency-tolerant).
+
+This avoids a 100-200ms WebSocket round-trip per audio frame that would have wiped out PersonaPlex's 80ms inference advantage.
+
 ```
 ┌─────────────────────────────────────────────────────────────────────────┐
 │ Caller phone (juror)                                                    │
@@ -38,59 +42,71 @@ The system is intentionally *boring* on infrastructure (LiveKit + Twilio + Modal
 │ Twilio                                                                  │
 │  • DID number (e.g. +49 30 XXXX XXXX)                                   │
 │  • SIP trunk → LiveKit                                                  │
+│  • Optional: TwiML "<Say>thank you for calling Allianz, please hold"    │
+│    while Modal warms up (only matters if keep_warm=0)                   │
 └────────────────────────────────┬────────────────────────────────────────┘
                                  │ SIP
 ┌────────────────────────────────▼────────────────────────────────────────┐
 │ LiveKit Cloud                                                           │
 │  • Creates room per call                                                │
-│  • WebRTC media routing                                                 │
-│  • Notifies our Agent dispatch service                                  │
+│  • WebRTC media routing (Opus 24kHz)                                    │
+│  • Dispatches the call to our Agent worker (registered process)         │
 └────────────────────────────────┬────────────────────────────────────────┘
-                                 │ WebRTC (Opus, 24kHz)
+                                 │ WebRTC (in-bound: caller audio)
+                                 │ WebRTC (out-bound: agent audio)
+                                 │
 ┌────────────────────────────────▼────────────────────────────────────────┐
-│ backend/  (LiveKit Agent process — CPU, runs on Modal CPU or Render)    │
+│ model_service/  (Modal A100 container — GPU + LiveKit Agent in ONE      │
+│                  Python process; both audio and inference here)         │
 │                                                                         │
 │  ┌───────────────────────────────────────────────────────────────────┐  │
-│  │  app/telephony/livekit_agent.py                                   │  │
-│  │   • Joins LiveKit room as headless participant                    │  │
-│  │   • Receives caller audio frames (24kHz PCM)                      │  │
-│  │   • Forwards audio → model_service WebSocket                      │  │
-│  │   • Plays response audio frames back into the room                │  │
+│  │  LiveKit Agent worker (livekit-agents SDK)                        │  │
+│  │   • Registers with LiveKit Cloud at boot, accepts dispatches      │  │
+│  │   • Subscribes to caller audio track per dispatched room          │  │
+│  │   • Publishes Sarah's audio track back to the room                │  │
+│  │   • Runs ElevenLabs Scribe v2 stream in parallel for entity       │  │
+│  │     verification (always-on ASR; feeds backend extractor context) │  │
+│  └─────────────────────┬─────────────────────────────────────────────┘  │
+│                        │ in-process Python call (μs latency)            │
+│  ┌─────────────────────▼─────────────────────────────────────────────┐  │
+│  │  PersonaPlex 7B (loaded once in @modal.enter)                     │  │
+│  │   • LMGen.step(input_tokens, text_token=forced) per 80ms frame    │  │
+│  │   • Persona priming at session start: text_prompt + voice_prompt  │  │
+│  │   • forced text_token is read from a per-call directive cache     │  │
+│  │     populated asynchronously by the control-plane WS              │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
+└────────────────────────┬────────────────────────────────────────────────┘
+                         │ Control plane WebSocket (JSON only)
+                         │   • backend pushes ReasonerDirectives
+                         │   • Modal pushes transcript turns + status
+                         │   • latency-tolerant: 50-200ms RTT is fine
+                         ▼
+┌─────────────────────────────────────────────────────────────────────────┐
+│ backend/  (CPU-only — runs on Render / Vercel / Modal CPU / localhost)  │
+│                                                                         │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  app/control/server.py — control-plane WS server (or client)      │  │
+│  │   • Receives transcripts (PersonaPlex monologue + Scribe ASR)     │  │
+│  │   • Pushes directives back to Modal                               │  │
 │  └─────────────────────┬─────────────────────────────────────────────┘  │
 │                        │                                                │
 │  ┌─────────────────────▼─────────────────────────────────────────────┐  │
 │  │  app/reasoner/                                                    │  │
 │  │   • state.py — FNOL slot tracker (Pydantic)                       │  │
-│  │   • extractor.py — async slot extractor (gpt-4o-mini / Haiku)     │  │
+│  │   • extractor.py — async slot extractor (Anthropic Haiku)         │  │
 │  │   • gate.py — intervention triggers (wrap-up, drift, compliance)  │  │
 │  │   • drip.py — text token sequencer (12.5 Hz cadence)              │  │
-│  └─────────────────────┬─────────────────────────────────────────────┘  │
-│                        │                                                │
-│   Pushes Reasoner state via WS (control plane, async, non-blocking)     │
-│                        │                                                │
-└────────────────────────┼────────────────────────────────────────────────┘
-                         │
-       ┌─────────────────┴─────────────────┐
-       │                                   │
-       │ Audio plane (WebSocket, PCM)      │ Control plane (WebSocket, JSON)
-       │   - bidirectional 24kHz PCM       │   - Reasoner pushes:
-       │   - tight latency budget          │     {action: "speak"|"silent",
-       │                                   │      drip: "..." | null}
-       │                                   │   - latency-tolerant
-       ▼                                   ▼
-┌─────────────────────────────────────────────────────────────────────────┐
-│ model_service/  (Python, GPU — Modal H100/A100)                         │
+│  │   • db.py / mock_policies.json — policy lookup                    │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
-│  • PersonaPlex 7B loaded once, kept warm via streaming_forever()        │
-│  • Persona priming at session start: text_prompt + voice_prompt         │
-│  • Per-frame loop (every 80ms = 12.5 Hz):                               │
-│      1. Read latest Reasoner directive from local cache                 │
-│      2. Decide forced text_token: None | EPAD | PAD | drip_token_id     │
-│      3. tokens = lm_gen.step(input_tokens=user_audio,                   │
-│                              text_token=forced_tensor)                  │
-│      4. Decode audio frame (~80ms PCM)                                  │
-│      5. Push frame back over audio WS                                   │
-│  • Pre-recorded rescue clips for "you're breaking up" fallback          │
+│  ┌───────────────────────────────────────────────────────────────────┐  │
+│  │  app/telephony/twilio_handler.py                                  │  │
+│  │   • Receives Twilio inbound webhooks                              │  │
+│  │   • Generates LiveKit room + agent token                          │  │
+│  │   • Triggers Modal's PersonaPlexAgent.process_call.spawn(...)     │  │
+│  └───────────────────────────────────────────────────────────────────┘  │
+│                                                                         │
 └─────────────────────────────────────────────────────────────────────────┘
 
          ┌─────────────────────────────────────┐
@@ -105,35 +121,43 @@ The system is intentionally *boring* on infrastructure (LiveKit + Twilio + Modal
          └─────────────────────────────────────┘
 ```
 
-## Two-channel WebSocket protocol (backend ⇄ model_service)
+## Control plane WebSocket (backend ⇄ Modal)
 
-We use **two separate WebSocket connections** between backend and model_service:
+**Only JSON messages travel this channel — no audio.** Audio stays inside Modal (caller audio in via LiveKit WebRTC, processed by PersonaPlex, agent audio out via LiveKit WebRTC). The control plane carries directives both ways.
 
-### Audio plane
+### Backend → Modal (Reasoner directives)
 
-- Bidirectional 24kHz mono PCM
-- Frame size: 80ms (1920 samples) — matches Moshi's frame rate
-- Tight latency: every ms here is felt by the caller
-- Backend writes user audio chunks; model_service writes agent response chunks
+```json
+{"type": "speak", "seq": 12, "text": "Before I let you go...", "after_release": "resume"}
+{"type": "silent", "seq": 13, "duration_frames": 25}
+{"type": "release", "seq": 14}
+{"type": "rescue_clip", "seq": 15, "clip_id": "breaking_up_1"}
+{"type": "load_policy_context", "seq": 16, "policy_brief": "Caller is Anna Schmidt..."}
+```
 
-### Control plane
+See `backend/app/reasoner/drip.py` for the full schema. Each directive has a monotonic `seq` so Modal can order/dedupe.
 
-- JSON messages, lower frequency
-- **Reasoner → model_service** (push only, frequent):
-  ```json
-  {"type": "directive", "action": "drip", "tokens": [123, 456, 789]}
-  {"type": "directive", "action": "epad"}
-  {"type": "directive", "action": "pad"}
-  {"type": "directive", "action": "release"}
-  {"type": "rescue_clip", "clip_id": "breaking_up_1"}
-  ```
-- **model_service → backend** (push, every Moshi frame):
-  ```json
-  {"type": "text_token", "token_id": 234, "decoded": " yes"}
-  {"type": "audio_event", "kind": "started_speaking"}
-  ```
+### Modal → Backend (transcripts + status)
 
-Why two channels: audio plane has hard real-time constraints; control plane is async and allows the Reasoner to update state without blocking audio. Mixing them in one connection causes head-of-line blocking under load.
+```json
+{"type": "transcript", "seq": 100, "role": "agent", "token_id": 234, "text": " yes",
+                       "source": "personaplex"}
+{"type": "transcript", "seq": 101, "role": "caller", "text": "POL-2024-001",
+                       "source": "scribe"}
+{"type": "session_ready", "call_id": "abc-123"}
+{"type": "session_closed", "call_id": "abc-123", "reason": "caller hung up"}
+```
+
+Backend's Reasoner aggregates the transcript stream (from both sources) and runs slot extraction asynchronously per user-turn boundary, writing back directives when the gate fires.
+
+### Why this is fast enough
+
+Audio is the latency-critical path; it never goes over this WS. The control plane handles thousands of small JSON messages per call, each ~100 bytes, and a 100-200ms RTT to push a directive doesn't degrade the user experience because:
+- Sarah's speech generation is fed by the latest cached directive at frame time (read locally on Modal)
+- Reasoner-driven nudges are inherently slow (the gate fires once every 5-30s)
+- Transcript pushes are fire-and-forget — backend can be momentarily slow without blocking audio
+
+If we ever need to colocate the Reasoner with PersonaPlex (e.g. to eliminate the WS entirely), `app/reasoner/` is pure Python and can be imported into the Modal container directly. Documented as a fallback, not currently needed.
 
 ## Verification ASR backchannel
 
@@ -262,24 +286,29 @@ The LiveKit Agent receives PersonaPlex's text monologue stream over the control 
 
 ### Baseline: PersonaPlex on its own
 
-Per the Moshi paper, theoretical 160ms, practical ~200ms model latency. Add codec, round-trip:
+Per the Moshi paper, theoretical 160ms, practical ~200ms model latency. With LiveKit Agent + PersonaPlex co-located on Modal, audio takes one network hop into Modal and one back out:
 
 | Hop | Time |
 |---|---|
 | PersonaPlex inference (per frame) | ~80ms |
 | Mimi encode + decode | ~10ms |
-| **Sub-total: model + codec** | **~90ms** |
-| Add network round-trip (Twilio ↔ LiveKit ↔ backend ↔ model_service, all in EU) | ~80–150ms |
-| Speaker → mic → PSTN → Twilio | ~100–150ms |
-| **Total mouth-to-ear** | **~270–390ms** |
+| **Sub-total: model + codec (in-process Python)** | **~90ms** |
+| Twilio ↔ LiveKit Cloud ↔ Modal (single WebRTC hop, EU regions) | ~30–80ms one-way |
+| PSTN: handset ↔ Twilio | ~100–150ms one-way |
+| **Total mouth-to-ear (one direction)** | **~220–320ms** |
 
-This is below the 500ms "feels human" threshold. Good baseline.
+Well below the 500ms "feels human" threshold. The co-location decision saved us ~80–150ms vs the original two-hop design (where backend would have been the LiveKit Agent and forwarded audio to model_service over a separate WS).
+
+Cold-start measured on Modal A100 (verified 2026-04-25):
+- Container boot: ~20s
+- PersonaPlex setup (Mimi + LM 7B + LMGen + warmup): **59s** measured
+- **Total cold start: ~80s** — masked by `keep_warm=1` during demo, or by Twilio `<Say>` preamble for dev
 
 ### Adding our injection: how much latency does it add?
 
-**Per-frame additions inside the model_service loop:**
+**Per-frame additions inside the per-call loop:**
 
-1. Read latest Reasoner directive from local cache (in-process dict): **<0.1ms**
+1. Read latest Reasoner directive from local in-process cache: **<0.1ms**
 2. Build forced text_token tensor (or use cached one): **<0.1ms**
 3. Branch in `LMGen.prepare_step_input()` to write the cache: **<0.1ms** (single tensor index op)
 
@@ -289,17 +318,18 @@ This is below the 500ms "feels human" threshold. Good baseline.
 
 | Anti-pattern | Cost | Fix |
 |---|---|---|
-| Synchronously call slot extractor LLM in the per-frame loop | +200–1000ms per frame, system collapses | Run extractor async on user-turn boundary, push state to model_service over control WS |
-| Make per-frame RPC from model_service to backend ("what should I inject?") | +20–100ms per frame depending on geo | Reasoner *pushes* directives; model_service reads from local cache |
-| Deploy backend in US, model_service in EU (or vice versa) | +80–150ms per audio round-trip | Co-locate in same region (EU for Berlin hackathon) |
-| Single WebSocket carrying both audio + control | Head-of-line blocking under contention | Two separate WebSockets (described above) |
+| Audio path crossing the model_service ↔ backend boundary | +60–200ms per round-trip | Co-locate LiveKit Agent + PersonaPlex on Modal — already done |
+| Synchronously calling slot extractor LLM in the per-frame loop | +200–1000ms per frame, system collapses | Extractor runs async on user-turn boundary; the per-frame loop reads cached state |
+| Per-frame RPC from Modal to backend ("what should I inject?") | +20–100ms per frame depending on geo | Backend *pushes* directives; Modal reads from local cache only |
+| Deploying backend in a different region than Modal | +80–150ms control-plane RTT | Backend region-aligned with Modal (both EU). Less critical than audio path but still good hygiene |
 | Burst-inject text tokens (>20 chars at once) | Audio head degenerates → token repetition | Drip-feed at 12.5 Hz cadence (VAOS journal lesson) |
+| Cold-starting on the first juror call | ~80s of dead air | `keep_warm=1` during demo period (`CLIO_DEMO_MODE=1 modal deploy ...`); Twilio `<Say>` preamble as belt-and-braces |
 
 ### Honest summary
 
-**If we design the WebSocket protocol right, the injection adds ~0ms.** All real latency lives in: PersonaPlex itself (~90ms, fixed), telephony round-trip (~80–150ms, geo-dependent), and PSTN handset latency (~100–150ms, fixed). Our code controls none of these meaningfully.
+**With co-location and async control, our software adds ~0ms to the audio path.** All real latency lives in: PersonaPlex itself (~90ms, fixed), the single LiveKit Cloud → Modal WebRTC hop (~30–80ms, geo-dependent), and PSTN handset latency (~100–150ms each way, fixed). Our code controls none of these meaningfully.
 
-The latency risk is **architectural** (don't make per-frame RPC, don't run extractor synchronously) not **algorithmic** (the math of our injection is cheap).
+The latency risk is **architectural** (don't double-hop audio through backend, don't run extractor synchronously) not **algorithmic** (the math of our injection is cheap).
 
 ## Pipecat: add or skip?
 
@@ -328,26 +358,34 @@ This deferral keeps the dependency graph minimal until we have evidence Pipecat 
 |---|---|---|
 | Twilio DID | EU region | minimize PSTN hop |
 | LiveKit | LiveKit Cloud (EU) | matches Twilio region |
-| backend (LiveKit Agent) | Modal CPU (EU) or Render | same region as LiveKit |
-| model_service | Modal GPU (EU, H100 or A100) | same region as backend |
+| **model_service (LiveKit Agent + PersonaPlex co-located)** | **Modal A100, EU region** | Audio path stays inside this single container — no extra hops |
+| backend (Reasoner + Twilio webhook handler + control WS) | Render / Vercel / Modal CPU | CPU-only, communicates with model_service via JSON over WS |
 | frontend | Vercel | not latency-critical |
 
-All audio-path components in EU (Frankfurt or Dublin). Total intra-region latency: 5–20ms per hop.
+Audio path is exactly one hop: LiveKit Cloud (EU) → Modal A100 (EU). 5–20ms intra-region.
 
 ### Dev / local
 
 ```bash
-# Terminal 1: model service (needs GPU; or use Modal serve --watch)
+# Terminal 1: model_service (mock-talker, no GPU needed) — protocol tests + drip-feed dev
 cd model_service && uv run python -m server.main
 
-# Terminal 2: backend (LiveKit Agent connects to LiveKit Cloud dev project)
-cd backend && uv run python -m app.telephony.livekit_agent dev
+# Terminal 2: backend control plane (Reasoner WS server + Twilio webhook handler)
+cd backend && uv run python -m app.control.server
 
-# Terminal 3: frontend
+# Terminal 3: frontend (monitoring UI)
 cd frontend && pnpm dev
 ```
 
-For end-to-end test without a real phone: LiveKit's web SDK — talk into the browser, it joins as a room participant.
+For real-PersonaPlex end-to-end testing, deploy to Modal:
+
+```bash
+modal deploy model_service/deploy/modal_app.py     # dev: keep_warm=0
+CLIO_DEMO_MODE=1 modal deploy model_service/deploy/modal_app.py   # demo: always-warm
+modal app stop personaplex-clio                    # stop billing when done
+```
+
+For end-to-end test without a real phone: LiveKit Agents' built-in dev console connects via web mic.
 
 ## Persona (Sarah) configuration
 
@@ -380,11 +418,12 @@ This is the only persona configuration. It's loaded once into PersonaPlex's KV c
 
 ## Open questions to resolve before code-write
 
-1. **LiveKit Agent or LiveKit + Pipecat?** Default LiveKit-only; revisit after first end-to-end test.
+1. **LiveKit Agent or LiveKit + Pipecat?** Default LiveKit-only; revisit after first end-to-end test. ✅ Decided LiveKit-only.
 2. **Custom voice for Sarah, or NATF1 off the shelf?** Test NATF1, NATF2, NATM2 quickly; pick best in <1 hour.
 3. **Where does the FNOL state schema live as the source of truth?** Backend `app/reasoner/schema.py` (Pydantic). Frontend imports types via codegen or defines TS types manually.
-4. **Twilio DID provisioning** — need an EU number with SIP trunk routing to LiveKit. Do this on day 1.
-5. **Modal cold-start time for PersonaPlex** — must be <30s or we lose calls. Use `keep_warm=True` and a heartbeat.
+4. **Twilio DID provisioning** — need an EU number with SIP trunk routing to LiveKit. ✅ Done.
+5. **Modal cold-start time for PersonaPlex** — measured 59s for setup, ~80s total with container boot. Demo uses `min_containers=1` (CLIO_DEMO_MODE=1). Twilio `<Say>` preamble as belt-and-braces.
+6. **GPU choice** — A100 40GB (~$26/day keep-warm) for VRAM headroom over A10G. ✅ Validated PersonaPlex 7B loads cleanly on A100.
 
 ## What this architecture deliberately does NOT do
 
