@@ -1,0 +1,29 @@
+another we find the bug is that the agent do not always finish ask all the list elements on the claim draft? anything we should do about it?
+
+---
+
+but isn't that keeps updating the list, we delete asked eleleent in the list from the checklist, and Sarah keeps getting update by drip feed forced token?
+
+---
+
+but isn't that keeps updating the list, we delete asked eleleent in the list from the checklist, and Sarah keeps getting update by drip feed forced token (unasked questions reminded by reasoner)
+
+---
+
+also i think the prompt to long makes the snapshot saved took 19.9GB
+
+---
+
+but we need to switch to A100 80GB then, to keep things safe
+
+---
+
+do you think we can also make the reasoner to trigger the travily tool?
+
+---
+
+can you just wrtie a tool script but dont wire up to our system? we want to leave it to next version, you can use context7 mcp to know travily api
+
+---
+
+says in README we have this, but chose to deactivate from main system for latency issue
