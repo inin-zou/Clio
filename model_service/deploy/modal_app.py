@@ -45,15 +45,96 @@ Backend Reasoner (CPU, separate process) — slot extractor + gate + state
 """
 from __future__ import annotations
 
+import logging
 import os
 
 import modal
+
+# Make logger.info() actually appear in `modal app logs`. Python's default
+# is WARNING which silently swallows our process_call progress messages.
+logging.basicConfig(
+    level=os.environ.get("LOG_LEVEL", "INFO"),
+    format="%(asctime)s [%(name)s] %(levelname)s %(message)s",
+    force=True,  # override any prior config from imported libs
+)
 
 # ─── Toggles ─────────────────────────────────────────────────────────────────
 
 DEMO_MODE = os.environ.get("CLIO_DEMO_MODE") == "1"
 
 APP_NAME = "personaplex-clio"
+
+# Voice prompt loaded once at @enter and snapshotted. Backend's voice_prompt_id
+# in SessionStart is logged but ignored — switching voices mid-deploy requires
+# a redeploy.
+DEFAULT_VOICE_ID = "NATF1"
+
+# Where setup() writes the post-priming streaming state for reuse per call.
+# Container-local /tmp; rebuilt on every container start so always in sync
+# with the loaded model.
+SNAPSHOT_DIR = "/tmp/clio_snapshots"
+
+# Sarah's static persona. Mirrors backend/app/reasoner/persona.py:BASE_PERSONA.
+# We bake it in here so setup() can prime + snapshot the streaming state ONCE
+# per container start, then restore the snapshot per call (~ms instead of the
+# 33s step_system_prompts costs every time). Backend's session_system_prompt
+# adds a small time-of-day block on top; that variation is dropped here, so
+# Sarah won't say "good morning" specifically — fine for FNOL flow.
+#
+# Keep this in sync with backend/app/reasoner/persona.py:BASE_PERSONA.
+BAKED_PERSONA = """\
+You work for Allianz Claims at the Berlin office and your name is Sarah. \
+You are an experienced claims representative with 8 years on the desk. \
+You speak English with a German accent. You handle inbound first-notice-of-loss \
+calls all day, mostly auto claims.
+
+Your style:
+- Calm, empathetic, professional. You sound like a real person, not a script.
+- When callers are upset (which is normal — they often just had an accident), \
+acknowledge their feelings BEFORE asking factual questions. Examples: \
+"I'm sorry that happened, are you somewhere safe right now?" / \
+"Take your time, I know this is stressful."
+- Let callers finish their thoughts. Don't interrupt mid-sentence.
+- Use natural fillers occasionally — "let me see", "okay", "got it", "mm-hmm" — \
+but don't overdo them.
+- Don't sound rehearsed. You handle these calls every day.
+
+Entity verification protocol — ALWAYS follow:
+When the caller provides any of the following items, WAIT for them to finish \
+their full statement, then read it back to confirm before continuing:
+
+  - Policy number
+  - License plate or VIN
+  - Phone number or email
+  - Date and exact time of the incident
+  - Police case number
+  - Names (caller, drivers, witnesses, other parties involved)
+  - Monetary amounts (damage estimates, etc.)
+
+Read-back format examples:
+  "Okay, so that's P-O-L dash 2-0-2-4 dash 0-0-1, is that right?"
+  "Got it, B as in Berlin, A-L, 1-2-3-4. Correct?"
+  "Just to confirm, that was at three forty-five PM on Saturday — is that right?"
+
+If the caller corrects you, acknowledge it briefly:
+  Caller: "No, it's 002 not 001."
+  Sarah:  "Ah okay, P-O-L dash 2-0-2-4 dash 0-0-2. Thanks for clarifying."
+
+Do NOT skip read-back even if you're confident you heard correctly. This is \
+standard claims procedure and protects against transcription errors.
+
+Things you NEVER ask:
+- Bank details. We never take those by phone.
+- Anything you already know from the policy file (vehicle make/model, \
+policyholder address, coverage type). Reference these naturally instead: \
+"I see you're on Vollkasko" not "what kind of coverage do you have".
+- Direct fraud-detection questions. Don't ask "do you and the other driver \
+know each other?" or "is your car for sale?". Those are for the back-office \
+team, not the FNOL call.
+
+If the caller doesn't have their policy number or license plate to hand, \
+you can find them via name + vehicle. Never refuse to help over a missing ID.
+"""
 
 # A100 40GB — chosen for VRAM headroom over A10G (24GB) so long FNOL calls
 # don't OOM mid-conversation. See .claude/docs/architecture.md for the math.
@@ -100,6 +181,11 @@ image = (
         "HF_HOME": "/root/.cache/huggingface",
         "HF_HUB_CACHE": "/root/.cache/huggingface/hub",
         "PYTHONUNBUFFERED": "1",
+        # CUDA OOM at ~3min into call was fragmentation, not actual model
+        # growth. expandable_segments lets the allocator grow segments
+        # in-place rather than reserving fresh ones — recommended in the
+        # error message itself.
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     })
 )
 
@@ -176,6 +262,22 @@ class PersonaPlexService:
         device = "cuda"
         repo = loaders.DEFAULT_REPO  # PersonaPlex's NVIDIA fork sets this
 
+        # Sanity-print the alloc config so we can confirm the env var is in
+        # the container at runtime. If this prints empty, image.env() didn't
+        # propagate and OOM mitigation isn't actually active.
+        print(
+            f"[setup] PYTORCH_CUDA_ALLOC_CONF="
+            f"{os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '<unset>')}",
+            flush=True,
+        )
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            print(
+                f"[setup] GPU memory at start: {free / 1e9:.1f}GB free / "
+                f"{total / 1e9:.1f}GB total",
+                flush=True,
+            )
+
         t_start = time.perf_counter()
 
         # Bumps the HF download counter for analytics (no-op on cached file).
@@ -244,7 +346,16 @@ class PersonaPlexService:
                 _ = self.mimi.decode(tokens[:, 1:9])
                 _ = self.other_mimi.decode(tokens[:, 1:9])
         torch.cuda.synchronize()
-        print(f"[setup]   warmup done ({time.perf_counter() - t0:.1f}s)", flush=True)
+        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            print(
+                f"[setup]   warmup done ({time.perf_counter() - t0:.1f}s) "
+                f"— GPU {(total - free) / 1e9:.1f}GB used / {total / 1e9:.1f}GB",
+                flush=True,
+            )
+        else:
+            print(f"[setup]   warmup done ({time.perf_counter() - t0:.1f}s)", flush=True)
 
         # ─── Voice prompts ──────────────────────────────────────────
         # NVIDIA ships voice prompt embeddings (NATF1.pt etc.) as voices.tgz
@@ -267,10 +378,75 @@ class PersonaPlexService:
               f"{len(available_voices)} prompts: {available_voices[:6]}...",
               flush=True)
 
+        # ─── Persona priming + state snapshot ───────────────────────
+        # Run the slow step_system_prompts ONCE here, then snapshot the
+        # resulting streaming state. process_call() restores from this
+        # snapshot per-call instead of re-priming (~50ms vs 33s).
+        print("[setup] priming Sarah persona + NATF1 voice...", flush=True)
+        t0 = time.perf_counter()
+        voice_path = Path(self.voices_dir) / f"{DEFAULT_VOICE_ID}.pt"
+        if not voice_path.exists():
+            raise RuntimeError(
+                f"default voice {DEFAULT_VOICE_ID}.pt not found in {self.voices_dir}"
+            )
+
+        wrapped_persona = _wrap_with_system_tags(BAKED_PERSONA)
+        self.lm_gen.load_voice_prompt_embeddings(str(voice_path))
+        self.lm_gen.text_prompt_tokens = self.tokenizer.encode(wrapped_persona)
+
+        self.mimi.reset_streaming()
+        self.other_mimi.reset_streaming()
+        self.lm_gen.reset_streaming()
+        self.lm_gen.step_system_prompts(self.mimi)
+        # Note: NO reset between step_system_prompts and snapshot. Resetting
+        # wipes the .cache field that set_streaming_state_inplace later
+        # requires. Per-call mimi reset happens inside process_call after
+        # the snapshot is restored.
+        torch.cuda.synchronize()
+        print(f"[setup]   primed in {time.perf_counter() - t0:.1f}s", flush=True)
+
+        print("[setup] saving post-prime streaming state to /tmp...", flush=True)
+        t0 = time.perf_counter()
+        # Use moshi's save_streaming_state (safetensors + json) instead of
+        # in-memory deepcopy. The dataclass _LMGenState contains CUDAGraph
+        # objects that can't be pickled, AND deepcopying the data tensors
+        # would orphan the graphs (which point at the originals). The on-
+        # disk safetensors path is the only API moshi supports for state
+        # snapshots, and `set_streaming_state_inplace` copies tensors INTO
+        # the live buffers via `.copy_()`, leaving CUDA graphs intact.
+        # `os` is imported at module level; importing it locally here would
+        # make `os` function-scoped everywhere in setup() and shadow the
+        # earlier `os.environ.get(...)` call.
+        import shutil
+        shutil.rmtree(SNAPSHOT_DIR, ignore_errors=True)
+        os.makedirs(SNAPSHOT_DIR, exist_ok=True)
+        for name, module in [
+            ("lm_gen", self.lm_gen),
+            ("mimi", self.mimi),
+            ("other_mimi", self.other_mimi),
+        ]:
+            module.save_streaming_state(
+                f"{SNAPSHOT_DIR}/{name}.safetensors",
+                f"{SNAPSHOT_DIR}/{name}.json",
+            )
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+        if torch.cuda.is_available():
+            free, total = torch.cuda.mem_get_info()
+            print(
+                f"[setup]   snapshot saved ({time.perf_counter() - t0:.1f}s) "
+                f"— GPU {(total - free) / 1e9:.1f}GB used / {total / 1e9:.1f}GB",
+                flush=True,
+            )
+        else:
+            print(f"[setup]   snapshot saved ({time.perf_counter() - t0:.1f}s)", flush=True)
+
         print(
             f"[setup] PersonaPlex ready — total {time.perf_counter() - t_start:.1f}s",
             flush=True,
         )
+
+    # No instance attrs needed — snapshots live on disk in SNAPSHOT_DIR.
 
     @modal.method()
     async def process_call(
@@ -321,6 +497,14 @@ class PersonaPlexService:
         if self.lm_gen is None:
             return {"ok": False, "error": "PersonaPlex not loaded (setup() failed?)"}
 
+        # Reclaim cached but unallocated GPU memory from any previous call
+        # on this warm container. Combined with expandable_segments env var,
+        # this stops cumulative fragmentation across calls from OOMing.
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
         ws_url = f"{backend_control_url.rstrip('/')}/control/{call_id}"
         t_call_started = time.perf_counter()
         frame_count = 0
@@ -345,36 +529,99 @@ class PersonaPlexService:
                     call_id, voice_prompt_id, len(system_prompt),
                 )
 
-                # ─── 2. Prime PersonaPlex with persona + voice prompt ─
-                # Mirrors personaplex/offline.py:241-256. The voice prompt
-                # injects target vocal characteristics; the system prompt
-                # sets role/tone via the text monologue stream.
+                # ─── 2. Restore the pre-primed Sarah persona snapshot ──
+                # setup() runs step_system_prompts ONCE per container start
+                # (~33s) and snapshots the resulting state. We restore that
+                # snapshot per call (~50ms). Backend's system_prompt field
+                # is logged for visibility but not enforced — to change
+                # Sarah's persona, edit BAKED_PERSONA + redeploy.
+                if voice_prompt_id != DEFAULT_VOICE_ID:
+                    logger.warning(
+                        "call %s: backend asked for voice %s but container "
+                        "is primed with %s — using primed voice",
+                        call_id, voice_prompt_id, DEFAULT_VOICE_ID,
+                    )
                 t0 = time.perf_counter()
-                voice_path = Path(self.voices_dir) / f"{voice_prompt_id}.pt"
-                if not voice_path.exists():
-                    return {
-                        "ok": False,
-                        "error": f"voice prompt {voice_prompt_id} not found in {self.voices_dir}",
-                    }
-
-                wrapped_prompt = _wrap_with_system_tags(system_prompt)
-                self.lm_gen.load_voice_prompt_embeddings(str(voice_path))
-                self.lm_gen.text_prompt_tokens = self.tokenizer.encode(wrapped_prompt)
-
-                self.mimi.reset_streaming()
-                self.other_mimi.reset_streaming()
-                self.lm_gen.reset_streaming()
-                self.lm_gen.step_system_prompts(self.mimi)
-                self.mimi.reset_streaming()
-                logger.info(
-                    "call %s: persona primed in %.1fs",
-                    call_id, time.perf_counter() - t0,
-                )
+                # Flip to True (then redeploy) to A/B test the slow per-call
+                # priming path. If Sarah sounds correct here but garbled with
+                # the snapshot path, the snapshot is broken.
+                if False:  # set True to force slow re-prime each call
+                    # SLOW PATH (debug only) — re-prime per call. Use this
+                    # to A/B test whether snapshot/restore is corrupting
+                    # state. If Sarah sounds correct here but garbled with
+                    # the snapshot path, the snapshot is broken.
+                    voice_path = Path(self.voices_dir) / f"{DEFAULT_VOICE_ID}.pt"
+                    self.lm_gen.load_voice_prompt_embeddings(str(voice_path))
+                    self.lm_gen.text_prompt_tokens = self.tokenizer.encode(
+                        _wrap_with_system_tags(BAKED_PERSONA)
+                    )
+                    self.mimi.reset_streaming()
+                    self.other_mimi.reset_streaming()
+                    self.lm_gen.reset_streaming()
+                    self.lm_gen.step_system_prompts(self.mimi)
+                    self.mimi.reset_streaming()
+                    logger.info(
+                        "call %s: persona re-primed (slow path) in %.1fs",
+                        call_id, time.perf_counter() - t0,
+                    )
+                else:
+                    # Load the disk snapshots into flat dicts and call
+                    # set_streaming_state_inplace, which copies tensors INTO
+                    # the live module buffers via .copy_() — leaving the
+                    # CUDA graphs (which point at those buffers) intact.
+                    #
+                    # Critical: reset_streaming() FIRST so the live module
+                    # has the same None/Tensor pattern as the snapshot.
+                    # Without this we hit `value.copy_(None.to(...))` errors
+                    # for fields that moshi lazy-allocates between calls.
+                    from moshi.modules.streaming import load_streaming_state
+                    self.lm_gen.reset_streaming()
+                    self.mimi.reset_streaming()
+                    self.other_mimi.reset_streaming()
+                    for name, module in [
+                        ("lm_gen", self.lm_gen),
+                        ("mimi", self.mimi),
+                        ("other_mimi", self.other_mimi),
+                    ]:
+                        # Load to CPU then let set_streaming_state_inplace
+                        # do the .to(value.device) per-tensor copy. Loading
+                        # the whole flat dict directly to CUDA spikes
+                        # allocation by ~1GB and OOMs at call start.
+                        flat = load_streaming_state(
+                            f"{SNAPSHOT_DIR}/{name}.safetensors",
+                            f"{SNAPSHOT_DIR}/{name}.json",
+                            device="cpu",
+                        )
+                        module.set_streaming_state_inplace(flat)
+                        del flat
+                    torch.cuda.empty_cache()
+                    # Wipe mimi's encoder state so the priming-time audio
+                    # frames don't bleed into the caller's first encode.
+                    self.mimi.reset_streaming()
+                    logger.info(
+                        "call %s: persona restored from snapshot in %.3fs",
+                        call_id, time.perf_counter() - t0,
+                    )
 
                 # ─── 3. Join LiveKit room ──────────────────────────────
                 room = rtc.Room()
                 caller_track: rtc.RemoteAudioTrack | None = None
                 track_event = asyncio.Event()
+                caller_left = asyncio.Event()
+
+                @room.on("participant_disconnected")
+                def _on_participant_disconnected(participant):
+                    # SIP participants from Twilio show up with identity like
+                    # `sip_+4917684071300`. When they leave (caller hangs up),
+                    # tear down the room so the audio_stream loop ends and
+                    # process_call can finish + send session_closed.
+                    if participant.identity.startswith("sip_"):
+                        logger.info(
+                            "call %s: caller disconnected (identity=%s)",
+                            call_id, participant.identity,
+                        )
+                        caller_left.set()
+                        asyncio.create_task(room.disconnect())
 
                 @room.on("track_subscribed")
                 def _on_track(track, publication, participant):
@@ -409,6 +656,102 @@ class PersonaPlexService:
                     await asyncio.wait_for(track_event.wait(), timeout=30)
                 except asyncio.TimeoutError:
                     return {"ok": False, "error": "no caller audio track within 30s"}
+
+                # ─── 3b. Open Scribe v2 streaming STT for caller transcript ─
+                # PersonaPlex's text head emits Sarah's monologue, NOT a
+                # transcript of the caller. Without an external ASR, the
+                # backend slot extractor sees only Sarah's words and can't
+                # capture FNOL data. Scribe streams realtime text per caller
+                # utterance, sent over the control WS as `source: "scribe"`.
+                scribe_stream = None
+                scribe_consume_task = None
+
+                # Loud env-var diagnostic. The Modal `clio-elevenlabs` secret
+                # SHOULD set ELEVENLABS_API_KEY but if someone created it as
+                # ELEVEN_API_KEY (matching LiveKit plugin docs) we fall back.
+                scribe_key = (
+                    os.environ.get("ELEVENLABS_API_KEY")
+                    or os.environ.get("ELEVEN_API_KEY")
+                )
+                env_keys_present = sorted(
+                    k for k in os.environ
+                    if "ELEVEN" in k.upper() or "SCRIBE" in k.upper()
+                )
+                logger.info(
+                    "call %s: scribe init — key_set=%s, env_keys=%s",
+                    call_id, bool(scribe_key), env_keys_present,
+                )
+
+                # Owned by this call; closed in finally.
+                scribe_http_session = None
+                if scribe_key:
+                    try:
+                        import aiohttp
+                        from livekit.agents import stt as lk_stt
+                        from livekit.plugins import elevenlabs as eleven
+
+                        # The plugin tries to grab a session from
+                        # `livekit.agents.utils.http_context` which only
+                        # exists inside an agent-worker run. We're calling
+                        # the STT class directly, so we must own the session.
+                        scribe_http_session = aiohttp.ClientSession()
+
+                        scribe = eleven.STT(
+                            api_key=scribe_key,
+                            model_id="scribe_v2_realtime",
+                            sample_rate=16000,
+                            language_code="en",
+                            http_session=scribe_http_session,
+                        )
+                        scribe_stream = scribe.stream()
+
+                        async def _consume_scribe():
+                            try:
+                                async for ev in scribe_stream:
+                                    if ev.type != lk_stt.SpeechEventType.FINAL_TRANSCRIPT:
+                                        continue
+                                    if not ev.alternatives:
+                                        continue
+                                    text = ev.alternatives[0].text or ""
+                                    if not text.strip():
+                                        continue
+                                    try:
+                                        await ws.send(json.dumps({
+                                            "type": "transcript",
+                                            "call_id": call_id,
+                                            "role": "caller",
+                                            "text": text,
+                                            "source": "scribe",
+                                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                                            "is_final": True,
+                                        }))
+                                        logger.info(
+                                            "call %s: scribe final: %r",
+                                            call_id, text[:80],
+                                        )
+                                    except websockets.exceptions.ConnectionClosed:
+                                        return
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as e:
+                                logger.exception(
+                                    "call %s: scribe consumer crashed: %s",
+                                    call_id, e,
+                                )
+
+                        scribe_consume_task = asyncio.create_task(_consume_scribe())
+                        logger.info("call %s: Scribe STT stream opened", call_id)
+                    except Exception as e:
+                        logger.exception(
+                            "call %s: failed to start Scribe (continuing without): %s",
+                            call_id, e,
+                        )
+                        scribe_stream = None
+                else:
+                    logger.warning(
+                        "call %s: ELEVENLABS_API_KEY not set — no caller ASR",
+                        call_id,
+                    )
 
                 # ─── 4-6. Per-frame inference loop + directives + VAD ──
                 # Drip state — mutated by the directive receiver task,
@@ -483,7 +826,47 @@ class PersonaPlexService:
                 )
                 buffer = np.empty(0, dtype=np.float32)
 
+                # Agent transcript batching. PersonaPlex's text head emits
+                # one token per 80ms frame; sending one transcript event per
+                # token swamps the SSE consumer with noise (every space,
+                # apostrophe, sub-word). We accumulate into ~half-second
+                # phrases and ship those.
+                AGENT_TEXT_FLUSH_SECONDS = 0.5
+                AGENT_TEXT_MAX_BUFFER = 60
+                SKIP_TEXT_TOKENS = {
+                    PAD_TOKEN_ID, EPAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID,
+                }
+                agent_text_buf = ""
+                agent_last_flush = time.perf_counter()
+
                 async for event in audio_stream:
+                    if caller_left.is_set():
+                        # Defensive — in case audio_stream keeps yielding
+                        # after the SIP participant left (it shouldn't, but
+                        # belt-and-suspenders so we don't sit on a dead call).
+                        logger.info("call %s: ending loop (caller left)", call_id)
+                        break
+
+                    # Fan out the caller frame to Scribe ASR in parallel
+                    # with PersonaPlex's encode/decode. Scribe does its
+                    # own buffering and emits FINAL_TRANSCRIPT events when
+                    # the caller pauses.
+                    if scribe_stream is not None:
+                        try:
+                            scribe_stream.push_frame(event.frame)
+                        except Exception as e:
+                            # Don't let an STT hiccup take down the call,
+                            # but log the FIRST occurrence so we know the
+                            # plugin contract is wrong (silent push_frame
+                            # failures are how Scribe stops working without
+                            # any clue in logs).
+                            if scribe_stream is not None:
+                                logger.warning(
+                                    "call %s: scribe push_frame failed (%s); disabling",
+                                    call_id, e,
+                                )
+                                scribe_stream = None
+
                     incoming = _audioframe_to_float32(event.frame)
                     buffer = np.concatenate([buffer, incoming])
 
@@ -545,22 +928,46 @@ class PersonaPlexService:
                             )
                             await audio_source.capture_frame(out_frame)
 
-                            # Push transcript token to backend
+                            # Accumulate agent text tokens into a buffer;
+                            # flush as a single transcript event every
+                            # AGENT_TEXT_FLUSH_SECONDS or when the buffer
+                            # gets large. Skip control tokens entirely.
                             text_token_id = int(tokens[0, 0, 0].item())
-                            if text_token_id != PAD_TOKEN_ID:  # skip PAD spam
-                                text = _decode_text_token(self.tokenizer, text_token_id)
-                                try:
-                                    await ws.send(json.dumps({
-                                        "type": "transcript",
-                                        "call_id": call_id,
-                                        "role": "agent",
-                                        "text": text,
-                                        "source": "personaplex",
-                                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                                    }))
-                                except websockets.exceptions.ConnectionClosed:
-                                    logger.warning("call %s: backend WS closed mid-call", call_id)
-                                    break
+                            if text_token_id not in SKIP_TEXT_TOKENS:
+                                piece = _decode_text_token(
+                                    self.tokenizer, text_token_id
+                                )
+                                if piece:
+                                    agent_text_buf += piece
+
+                            now_t = time.perf_counter()
+                            should_flush = bool(agent_text_buf) and (
+                                len(agent_text_buf) >= AGENT_TEXT_MAX_BUFFER
+                                or now_t - agent_last_flush
+                                    >= AGENT_TEXT_FLUSH_SECONDS
+                            )
+                            if should_flush:
+                                flush_text = agent_text_buf.strip()
+                                agent_text_buf = ""
+                                agent_last_flush = now_t
+                                if flush_text:
+                                    try:
+                                        await ws.send(json.dumps({
+                                            "type": "transcript",
+                                            "call_id": call_id,
+                                            "role": "agent",
+                                            "text": flush_text,
+                                            "source": "personaplex",
+                                            "timestamp": datetime.now(
+                                                timezone.utc
+                                            ).isoformat(),
+                                        }))
+                                    except websockets.exceptions.ConnectionClosed:
+                                        logger.warning(
+                                            "call %s: backend WS closed mid-call",
+                                            call_id,
+                                        )
+                                        break
 
                             frame_count += 1
                             if frame_count == 1:
@@ -575,6 +982,24 @@ class PersonaPlexService:
                     await directive_task
                 except asyncio.CancelledError:
                     pass
+
+                # Close Scribe STT stream + consumer + http session
+                if scribe_stream is not None:
+                    try:
+                        await scribe_stream.aclose()
+                    except Exception:
+                        pass
+                if scribe_consume_task is not None:
+                    scribe_consume_task.cancel()
+                    try:
+                        await scribe_consume_task
+                    except asyncio.CancelledError:
+                        pass
+                if scribe_http_session is not None:
+                    try:
+                        await scribe_http_session.close()
+                    except Exception:
+                        pass
 
                 logger.info(
                     "call %s: inference loop ended after %d frames (%.1fs)",
@@ -599,6 +1024,12 @@ class PersonaPlexService:
                     await room.disconnect()
                 except Exception:
                     pass
+            # Release per-call GPU memory back to the caching allocator so
+            # the next call doesn't OOM from cumulative fragmentation.
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
 
         return {
             "ok": True,
@@ -617,10 +1048,159 @@ class PersonaPlexService:
             "demo_mode": DEMO_MODE,
         }
 
+    @modal.method()
+    async def dump_state_shape(self) -> dict:
+        """Compare what get_streaming_state() returns vs the dataclass fields
+        set_streaming_state_inplace expects. The mismatch tells us which
+        fields we need to inject as None into our snapshot."""
+        from dataclasses import fields
+
+        def _walk_state(obj, path=""):
+            """Recursively walk a streaming state object and its submodules."""
+            out = {"path": path or "<root>", "type": type(obj).__name__}
+            if hasattr(obj, "_streaming_state") and obj._streaming_state is not None:
+                ss = obj._streaming_state
+                expected = [f.name for f in fields(ss)] if hasattr(ss, "__dataclass_fields__") else []
+                live = {}
+                for f_name in expected:
+                    try:
+                        v = getattr(ss, f_name)
+                        live[f_name] = type(v).__name__ + (
+                            f"{tuple(v.shape)}" if hasattr(v, "shape") else ""
+                        )
+                    except Exception as e:
+                        live[f_name] = f"<error: {e}>"
+                got = obj.get_streaming_state()
+                out["state_class"] = type(ss).__name__
+                out["expected_fields"] = expected
+                out["actual_keys"] = list(got.keys())
+                out["live_values"] = live
+                out["missing_from_snapshot"] = [
+                    f for f in expected if f not in got
+                ]
+            return out
+
+        # Run priming so state is in the same shape we'd snapshot
+        from pathlib import Path
+
+        voice_path = Path(self.voices_dir) / f"{DEFAULT_VOICE_ID}.pt"
+        wrapped = _wrap_with_system_tags(BAKED_PERSONA)
+        self.lm_gen.load_voice_prompt_embeddings(str(voice_path))
+        self.lm_gen.text_prompt_tokens = self.tokenizer.encode(wrapped)
+        self.mimi.reset_streaming()
+        self.other_mimi.reset_streaming()
+        self.lm_gen.reset_streaming()
+        self.lm_gen.step_system_prompts(self.mimi)
+
+        return {
+            "lm_gen": _walk_state(self.lm_gen, "lm_gen"),
+            "mimi": _walk_state(self.mimi, "mimi"),
+            "other_mimi": _walk_state(self.other_mimi, "other_mimi"),
+        }
+
+    @modal.method()
+    async def introspect_streaming_state(self) -> dict:
+        """Inspect the moshi/PersonaPlex objects to find their streaming-
+        state API. We need this to snapshot post-priming state in setup()
+        and restore it per-call (replacing the 33s step_system_prompts
+        priming with a sub-second restore).
+
+        Returns a structured report listing relevant attributes/methods
+        on lm_gen, mimi, and the underlying lm.transformer."""
+        import inspect
+
+        def _kind(obj) -> str:
+            t = type(obj).__name__
+            if hasattr(obj, "shape"):
+                return f"{t}{tuple(obj.shape)}"
+            if hasattr(obj, "__len__"):
+                try:
+                    return f"{t}(len={len(obj)})"
+                except Exception:
+                    pass
+            return t
+
+        def _scan(obj, label: str, extra_keywords=()) -> dict:
+            keywords = (
+                "stream", "state", "cache", "kv",
+                "prompt", "reset", "clone", "copy", "snapshot",
+                *extra_keywords,
+            )
+            attrs = []
+            for name in dir(obj):
+                if name.startswith("__"):
+                    continue
+                if not any(k in name.lower() for k in keywords):
+                    continue
+                try:
+                    val = getattr(obj, name)
+                except Exception as e:
+                    attrs.append({"name": name, "error": str(e)[:80]})
+                    continue
+                entry: dict = {"name": name}
+                if callable(val):
+                    try:
+                        entry["signature"] = str(inspect.signature(val))
+                    except Exception:
+                        entry["signature"] = "?"
+                    entry["kind"] = "method"
+                else:
+                    entry["kind"] = _kind(val)
+                attrs.append(entry)
+            return {
+                "label": label,
+                "type": type(obj).__name__,
+                "module": type(obj).__module__,
+                "attrs": attrs,
+            }
+
+        # The transformer (deep inside lm) is where KV cache lives in moshi.
+        # Try to find it via common paths.
+        lm = getattr(self.lm_gen, "lm_model", None) or getattr(
+            self.lm_gen, "lm", None
+        )
+        transformer = None
+        if lm is not None:
+            transformer = (
+                getattr(lm, "transformer", None)
+                or getattr(lm, "depformer", None)
+                or getattr(lm, "_transformer", None)
+            )
+
+        report = {
+            "lm_gen": _scan(self.lm_gen, "lm_gen"),
+            "mimi":   _scan(self.mimi, "mimi"),
+            "lm":     _scan(lm, "lm") if lm is not None else None,
+            "transformer": (
+                _scan(transformer, "transformer", extra_keywords=("offset",))
+                if transformer is not None else None
+            ),
+        }
+        return report
+
 
 # ─── Per-frame helpers ───────────────────────────────────────────────────────
 # These run inside the Modal container, so they can assume torch/numpy are
 # available. Kept at module level so process_call() stays readable.
+
+
+def _clone_streaming_state(state):
+    """Deep-copy a moshi streaming-state structure.
+
+    `get_streaming_state()` returns `{module_name: _StateClassInstance}`
+    where each value is a dataclass with nested state (tensors, custom
+    cache classes, etc). `set_streaming_state()` ASSIGNS the dataclass
+    to `module._streaming_state`, so later inference mutates our snapshot
+    unless we deep-clone before each restore.
+
+    We use `copy.deepcopy` rather than a hand-rolled walker so we don't
+    silently share-by-reference any custom classes that aren't dataclasses
+    (which is what the earlier hand-rolled helper did, producing garbled
+    output after the first call).
+    """
+    import copy
+
+    return copy.deepcopy(state)
 
 
 def _wrap_with_system_tags(text: str) -> str:
@@ -783,6 +1363,23 @@ def warmup_test() -> None:
     svc = PersonaPlexService()
     result = svc.health.remote()
     print(f"health: {result}")
+
+
+@app.local_entrypoint()
+def introspect_streaming_state() -> None:
+    """Print the streaming-state API surface of lm_gen / mimi / transformer.
+
+    Use the output to figure out how to snapshot post-priming state in
+    setup() and restore it per-call.
+
+    Usage:
+        modal run model_service/deploy/modal_app.py::introspect_streaming_state
+    """
+    import json
+
+    svc = PersonaPlexService()
+    report = svc.introspect_streaming_state.remote()
+    print(json.dumps(report, indent=2, default=str))
 
 
 @app.local_entrypoint()

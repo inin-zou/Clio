@@ -16,12 +16,18 @@ dependencies = [
 
     # Telephony / agent runtime
     "livekit-agents>=0.12",
+    "livekit-api>=1.0",
     "livekit-plugins-elevenlabs>=0.7",
+    "twilio>=9.3",
+
+    # Spawning the GPU container from the Twilio webhook
+    "modal>=0.64",
 
     # HTTP / SSE for monitoring API
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "httpx>=0.27",
+    "python-multipart>=0.0.9",  # Twilio webhook form parsing
 
     # WebSocket client for talking to model_service
     "websockets>=13",

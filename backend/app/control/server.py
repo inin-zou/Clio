@@ -30,13 +30,18 @@ from __future__ import annotations
 
 import logging
 import os
-from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from .orchestrator import CallOrchestrator
+from .registry import (
+    ACTIVE_CALLS,
+    PENDING_CALLS,
+    PendingCall,
+    register_pending_call,
+)
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -46,32 +51,14 @@ logger = logging.getLogger("clio.control.server")
 
 
 # ─── Pending call registry ───────────────────────────────────────────────────
-
-@dataclass
-class PendingCall:
-    call_id: str
-    livekit_room: str
-    livekit_agent_token: str
-    voice_prompt_id: str = "NATF1"
-
-
-# In-process registry. Keyed by call_id. Items are popped when Modal connects.
-PENDING_CALLS: dict[str, PendingCall] = {}
-
-# Active orchestrators by call_id, for monitoring API to introspect.
-ACTIVE_CALLS: dict[str, CallOrchestrator] = {}
+# PendingCall, PENDING_CALLS, ACTIVE_CALLS, and register_pending_call live in
+# .registry so backend/app/telephony/twilio_webhook.py can populate them
+# without a circular import on this server module. Re-exported above.
 
 # Where session JSON gets written when calls end.
 SESSION_OUTPUT_DIR = Path(
     os.environ.get("CLIO_SESSION_OUTPUT_DIR", "data/sessions")
 )
-
-
-def register_pending_call(setup: PendingCall) -> None:
-    """Twilio webhook handler calls this before spawning Modal.process_call."""
-    PENDING_CALLS[setup.call_id] = setup
-    logger.info("registered pending call %s for room %s",
-                setup.call_id, setup.livekit_room)
 
 
 # ─── FastAPI app ─────────────────────────────────────────────────────────────
@@ -175,3 +162,18 @@ async def register_mock_call(body: dict) -> dict:
     )
     register_pending_call(setup)
     return {"ok": True, "call_id": setup.call_id}
+
+
+# ─── Telephony router ────────────────────────────────────────────────────────
+# Late import: telephony.twilio_webhook depends on PendingCall +
+# register_pending_call defined above. By the time this line runs, both
+# symbols exist in this module's namespace, so the circular import resolves.
+from ..telephony.twilio_webhook import router as twilio_router  # noqa: E402
+
+app.include_router(twilio_router)
+
+# ─── SSE / monitoring UI ─────────────────────────────────────────────────────
+
+from .sse import router as sse_router  # noqa: E402
+
+app.include_router(sse_router)

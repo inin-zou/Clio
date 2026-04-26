@@ -15,8 +15,8 @@ direct via WebRTC. See architecture.md for the rationale.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Annotated, Literal, Union
+from datetime import UTC, datetime
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -29,7 +29,6 @@ from ..reasoner.drip import (
     SilenceDirective,
     SpeakDirective,
 )
-
 
 # ─── Backend → Modal: session bootstrap ──────────────────────────────────────
 
@@ -60,15 +59,7 @@ class SessionEnd(BaseModel):
 # ─── Backend → Modal: full discriminated union ───────────────────────────────
 
 BackendMessage = Annotated[
-    Union[
-        SessionStart,
-        SessionEnd,
-        SpeakDirective,
-        SilenceDirective,
-        ReleaseDirective,
-        RescueClipDirective,
-        LoadPolicyContextDirective,
-    ],
+    SessionStart | SessionEnd | SpeakDirective | SilenceDirective | ReleaseDirective | RescueClipDirective | LoadPolicyContextDirective,
     Field(discriminator="type"),
 ]
 
@@ -108,7 +99,7 @@ class TranscriptTurn(BaseModel):
     role: Literal["caller", "agent"]
     text: str
     source: Literal["personaplex", "scribe"] = "personaplex"
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
     is_final: bool = True  # Scribe partial transcripts may set this False
 
 
@@ -120,7 +111,7 @@ class CallerTurnBoundary(BaseModel):
     """
     type: Literal["caller_turn_boundary"] = "caller_turn_boundary"
     call_id: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 class ReadbackOutcome(BaseModel):
@@ -137,18 +128,12 @@ class ReadbackOutcome(BaseModel):
     proposed_value: str
     caller_response: Literal["confirmed", "corrected", "unclear"]
     final_value: str
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
 
 # ─── Modal → Backend: full discriminated union ───────────────────────────────
 
 ModalMessage = Annotated[
-    Union[
-        SessionReady,
-        SessionClosed,
-        TranscriptTurn,
-        CallerTurnBoundary,
-        ReadbackOutcome,
-    ],
+    SessionReady | SessionClosed | TranscriptTurn | CallerTurnBoundary | ReadbackOutcome,
     Field(discriminator="type"),
 ]

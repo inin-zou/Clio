@@ -73,13 +73,14 @@ The whole inference loop in `process_call()` has been deployed to Modal (compile
 - Backend ↔ Modal WebSocket connectivity from inside Modal container
 
 ### 🚧 Not yet written (blocks first end-to-end test)
-| Component | Estimated work |
+| Component | Status |
 |---|---|
-| **Backend Twilio webhook handler** (`/twilio/voice`): mint LiveKit room+token, register pending call, spawn Modal `process_call.spawn(...)`, return TwiML | ~2-3h, ~200 lines |
-| **Backend deployed to public URL** (so Modal can reach it): ngrok for dev, Modal CPU / Render for prod | ~30min |
-| **Twilio Console webhook URL** pointed at backend `/twilio/voice` | 5min |
-| **First end-to-end test call** — debug whatever blows up | unknown, 30min-half-day |
-| **Modal `CLIO_DEMO_MODE=1` redeploy** before judging | 1 command |
+| **Backend Twilio webhook handler** (`/twilio/voice`, `/twilio/status`) | ✅ written (`backend/app/telephony/twilio_webhook.py`), 6 unit tests pass |
+| **LiveKit SIP inbound trunk + dispatch rule** | ⏳ run commands in `.claude/docs/livekit-sip-setup.md`. Required to populate `LIVEKIT_SIP_URI` in `.env` |
+| **Backend deployed to public URL** (so Modal can reach it): ngrok for dev, Modal CPU / Render for prod | ⏳ ~30min. Set `BACKEND_PUBLIC_WS_URL=wss://<host>` in `.env` |
+| **Twilio Console webhook URL** pointed at backend `/twilio/voice` + `/twilio/status` | ⏳ 5min |
+| **First end-to-end test call** — debug whatever blows up | ⏳ unknown |
+| **Modal `CLIO_DEMO_MODE=1` redeploy** before judging | ⏳ 1 command |
 
 ### 🚧 Not yet written (demo polish, not blocking)
 | Component | Notes |

@@ -20,23 +20,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from pydantic import TypeAdapter, ValidationError
 
-from ..reasoner import db, gate, persona
+from ..reasoner import gate, persona
 from ..reasoner.extractor import SlotExtractor
 from ..reasoner.schema import (
     CRITICAL_SLOTS,
-    EXPECTED_SLOTS,
-    ENTITY_VERIFICATION_SLOTS,
     ReadbackEvent,
 )
 from ..reasoner.state import Session
+from .eventbus import EVENT_BUS
 from .messages import (
-    BackendMessage,
     CallerTurnBoundary,
     ModalMessage,
     ReadbackOutcome,
@@ -103,7 +101,7 @@ class CallOrchestrator:
     async def send_session_start(self) -> None:
         """First message Modal sees on the WS. Loads persona + tells Modal
         which LiveKit room to join."""
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         self._cold_start_started_at = now
         system_prompt = persona.session_system_prompt(now=now)
 
@@ -133,6 +131,12 @@ class CallOrchestrator:
         except Exception as e:
             logger.exception("failed to save session for call %s: %s",
                              self.call_id, e)
+
+        EVENT_BUS.publish(self.call_id, {
+            "type": "session_end",
+            "reason": reason,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
 
         # Close WS
         try:
@@ -167,8 +171,14 @@ class CallOrchestrator:
 
     async def _on_session_ready(self, msg: SessionReady) -> None:
         if self._cold_start_started_at:
-            elapsed = (datetime.now(timezone.utc) - self._cold_start_started_at).total_seconds()
+            elapsed = (datetime.now(UTC) - self._cold_start_started_at).total_seconds()
             logger.info("call %s: ready after %.1fs", self.call_id, elapsed)
+        EVENT_BUS.publish(self.call_id, {
+            "type": "session_ready",
+            "voice_prompt_id": msg.voice_prompt_id,
+            "cold_start_seconds": msg.cold_start_seconds,
+            "timestamp": datetime.now(UTC).isoformat(),
+        })
 
     async def _on_transcript(self, msg: TranscriptTurn) -> None:
         # Append to session transcript regardless of source.
@@ -180,6 +190,14 @@ class CallOrchestrator:
             source=msg.source,
             timestamp=msg.timestamp,
         )
+        EVENT_BUS.publish(self.call_id, {
+            "type": "transcript",
+            "role": msg.role,
+            "source": msg.source,
+            "text": msg.text,
+            "is_final": msg.is_final,
+            "timestamp": msg.timestamp.isoformat(),
+        })
 
     async def _on_turn_boundary(self, msg: CallerTurnBoundary) -> None:
         """Caller paused — good moment to run the slot extractor."""
@@ -203,6 +221,14 @@ class CallOrchestrator:
         self.reasoner_session.record_readback(event)
         logger.info("call %s: readback %s = %r (%s)", self.call_id,
                     msg.slot_path, msg.final_value, msg.caller_response)
+        EVENT_BUS.publish(self.call_id, {
+            "type": "readback",
+            "slot_path": msg.slot_path,
+            "proposed_value": msg.proposed_value,
+            "caller_response": msg.caller_response,
+            "final_value": msg.final_value,
+            "timestamp": msg.timestamp.isoformat(),
+        })
 
     async def _on_session_closed(self, msg: SessionClosed) -> None:
         await self.close(reason=msg.reason or "modal closed session")
@@ -213,7 +239,7 @@ class CallOrchestrator:
         """Background task: extract slots, apply, run gate, send directive."""
         try:
             session = self.reasoner_session
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
 
             # 1. Run extractor on the recent transcript window
             window = session.recent_turns(n=12)
@@ -242,6 +268,26 @@ class CallOrchestrator:
                 logger.info("call %s: %d updates rejected: %s", self.call_id,
                             len(rejected),
                             [f"{r.slot_path}: {r.reason}" for r in rejected[:3]])
+            if applied:
+                # `applied` is list[str] of slot paths. Look up the current
+                # value from the session report so the UI can display it.
+                report_dump = session.session.report.model_dump(mode="json")
+                EVENT_BUS.publish(self.call_id, {
+                    "type": "slot_updates",
+                    "applied": [
+                        {
+                            "slot_path": path,
+                            "value": _resolve_path(report_dump, path),
+                        }
+                        for path in applied
+                    ],
+                    "rejected": [
+                        {"slot_path": r.slot_path, "reason": r.reason}
+                        for r in rejected
+                    ],
+                    "extractor_reasoning": result.reasoning,
+                    "timestamp": now.isoformat(),
+                })
 
             # 3. Run the intervention gate
             directive = self.gate.decide(session, now=now)
@@ -249,6 +295,13 @@ class CallOrchestrator:
                 logger.info("call %s: gate fires %s — %s", self.call_id,
                             directive.type, directive.reason)
                 await self._send(directive)
+                EVENT_BUS.publish(self.call_id, {
+                    "type": "gate_directive",
+                    "directive_type": directive.type,
+                    "reason": directive.reason,
+                    "text": getattr(directive, "text", None),
+                    "timestamp": now.isoformat(),
+                })
 
         except asyncio.CancelledError:
             raise
@@ -296,3 +349,17 @@ def _has_value(report: Any, path: str) -> bool:
         if cursor is None:
             return False
     return cursor not in (None, "", [], {})
+
+
+def _resolve_path(report_dump: dict, path: str) -> Any:
+    """Walk a dotted slot path through a model_dump dict; return None if any
+    intermediate is missing. Used by the event publisher to surface the
+    current value of a just-applied slot to the UI."""
+    cursor: Any = report_dump
+    for part in path.split("."):
+        if not isinstance(cursor, dict):
+            return None
+        cursor = cursor.get(part)
+        if cursor is None:
+            return None
+    return cursor
