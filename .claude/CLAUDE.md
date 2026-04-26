@@ -25,7 +25,7 @@ If you're new to this codebase, **read `.claude/gotchas.md` before changing anyt
 | Voice model | **PersonaPlex 7B** off-the-shelf — Moshi-derived, full-duplex, public `LMGen.step(text_token=...)` injection API |
 | Telephony ingress | Twilio DID (US, +12183048451) + SIP → LiveKit Cloud |
 | Real-time media | LiveKit Cloud (WebRTC) — fixed-room dispatch (`clio-active`) for single-call demos |
-| **GPU runtime** | **Modal A100 40GB** — PersonaPlex + Mimi (×2) co-located in ONE container (app: `personaplex-clio`) |
+| **GPU runtime** | **Modal A100 80GB** — PersonaPlex + Mimi (×2) co-located in ONE container (app: `personaplex-clio`). Sized for safety: snapshot baseline ~20GB + per-call peak ~33GB + ~1.75GB/min CUDA-graph leak. 80GB gives 2× headroom over the 40GB SKU we used initially. |
 | **CPU backend** | **Modal `@asgi_app`** — FastAPI + orchestrator + Twilio webhook + Supabase writer (app: `clio-backend`) |
 | ASR (caller transcript) | **ElevenLabs Scribe v2 Realtime** — wired up; produces clean caller transcripts that feed the slot extractor |
 | Slot extractor | Anthropic Claude Haiku 4.5 (tool-use API, structured output) |
@@ -192,7 +192,7 @@ Clio/
 
 ### Modal
 - **Two apps**: `personaplex-clio` (GPU) and `clio-backend` (CPU `@asgi_app`).
-- **Deploy GPU** (always-warm A100, ~$26/day): `CLIO_DEMO_MODE=1 modal deploy model_service/deploy/modal_app.py`
+- **Deploy GPU** (always-warm A100 80GB, ~$50/day): `CLIO_DEMO_MODE=1 modal deploy model_service/deploy/modal_app.py`
 - **Deploy backend**: `modal deploy model_service/deploy/modal_backend.py`
 - **`modal deploy` does NOT swap the warm container automatically.** Use `modal app stop personaplex-clio` first to force fresh-container restart with new code.
 - **Stop billing when not demoing**: `modal app stop personaplex-clio`. Backend CPU is cheap, leave running.

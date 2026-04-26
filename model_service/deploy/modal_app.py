@@ -1,6 +1,6 @@
 """
 Modal deployment for Clio's voice agent: PersonaPlex 7B + LiveKit Agent
-co-located on a single A100 40GB container.
+co-located on a single A100 80GB container.
 
 Usage
 -----
@@ -14,17 +14,17 @@ First-time secrets setup (one-time, you've already done hf-token):
 Dev (cold-start, cheap):
     modal serve model_service/deploy/modal_app.py
 
-Demo (always-warm A100, ~$26 / day):
+Demo (always-warm A100 80GB, ~$50 / day):
     CLIO_DEMO_MODE=1 modal deploy model_service/deploy/modal_app.py
 
 Stop billing when not demoing:
     modal app stop personaplex-clio
 
 
-Cost reference (A100 40GB on Modal as of 2026-04):
-    - On-demand:        ~$1.10 / GPU-hour
-    - Always-warm 24h:  ~$26 / day
-    - 2-day demo:       ~$53
+Cost reference (A100 80GB on Modal as of 2026-04):
+    - On-demand:        ~$2.10 / GPU-hour
+    - Always-warm 24h:  ~$50 / day
+    - 2-day demo:       ~$100
 
 
 Architecture
@@ -34,7 +34,7 @@ Caller phone → Twilio DID → SIP → LiveKit Cloud → WebRTC → Modal conta
    ┌────────────────────────────────────────────────────────┘
    ▼
 ┌───────────────────────────────────────────────────────────┐
-│ Modal A100 container (this file)                          │
+│ Modal A100 80GB container (this file)                     │
 │   ├─ LiveKit Agent worker (livekit-agents SDK)            │
 │   ├─ PersonaPlex 7B  (loaded once in @modal.enter)        │
 │   └─ ElevenLabs Scribe v2 stream (entity verification)    │
@@ -156,9 +156,13 @@ If the caller doesn't have their policy number or license plate to hand, \
 you can find them via name + vehicle. Never refuse to help over a missing ID.
 """
 
-# A100 40GB — chosen for VRAM headroom over A10G (24GB) so long FNOL calls
-# don't OOM mid-conversation. See .claude/docs/architecture.md for the math.
-GPU_KIND = "A100"
+# A100 80GB — sized for safety. Per-snapshot baseline is ~20GB (weights
+# + KV cache + Mimi state) and per-call peak hits ~33GB on the 40GB SKU
+# at 78% utilization, leaving little headroom for the documented
+# ~1.75GB/min CUDA-graph leak on long calls. 80GB doubles the margin so
+# 5-10min calls don't tip into OOM territory. Cost roughly doubles
+# (~$2.10/GPU-hr on Modal vs ~$1.10), but for a demo that's acceptable.
+GPU_KIND = "A100-80GB"
 
 # When idle, Modal stops the container after this many seconds. With
 # min_containers=1 (demo mode), one container stays alive regardless.
@@ -211,8 +215,8 @@ image = (
         # `torch.cuda.empty_cache()` and `reset_streaming()` can't
         # release, leading to ~1.75GB/min leak and OOM around 12 min in.
         # Tradeoff: per-frame inference is somewhat slower (no graph
-        # optimization) — measure that we stay under the 80ms/frame
-        # budget. If we don't, switch to gpu="A100-80GB" instead.
+        # optimization) — but we stay well under the 80ms/frame budget,
+        # and the A100 80GB SKU absorbs the leak's footprint.
         "TORCHDYNAMO_DISABLE": "1",
     })
 )

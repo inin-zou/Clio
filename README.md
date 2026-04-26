@@ -236,6 +236,33 @@ triggers can override that:
 All gate texts are **hand-templated** (in `gate.py` and `drip.py`), not
 LLM-generated. Predictable latency, no inflight calls during voice loop.
 
+### Optional: Tavily fact-checker (built, deactivated for latency)
+
+`backend/app/reasoner/tavily.py` is a self-contained async wrapper around
+Tavily's web search API, with three primitive checks:
+- `weather_at(location, when)` — corroborates the caller's weather claim
+- `verify_location(address)` — confirms the address exists / is plausible
+- `news_check(location, when)` — looks for traffic/incident news in a ±1 day window
+
+Each returns a structured `FactCheckResult` with an `inconsistency_signal`
+flag the gate can use to populate `fraud_signals.inconsistencies`. The
+intent: when the caller says "icy roads" but Tavily reports clear and
+dry, surface that as a fraud chip in the operator UI.
+
+**Why it's currently unwired:** even running async off the hot loop,
+each Tavily lookup adds 1-2s of round-trip and 80-200ms of result-processing
+overhead. The drip-feed pattern would inject "(Internal: weather was X)"
+into Sarah's text stream — fine in isolation, but each one consumes
+agent_text_buf flush capacity and competes with gate-driven directives
+for the drip queue. We chose to keep the voice loop strictly local
+(Mimi + PersonaPlex + persona-cached state) and defer external lookups
+to a follow-up version.
+
+The full wiring checklist is in the module's top-level docstring (six
+numbered steps: dep, env, secret, mount, gate trigger, orchestrator
+routing). Smoke test from the CLI with
+`TAVILY_API_KEY=tvly-... uv run python -m backend.app.reasoner.tavily`.
+
 ## How we got latency under 800ms
 
 Inca's "feels human" threshold is around 800ms round-trip (caller speaks
