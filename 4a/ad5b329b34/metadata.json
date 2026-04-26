@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "4aad5b329b34",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 8,
+  "files_touched": [
+    "backend/app/control/orchestrator.py",
+    "backend/app/reasoner/gate.py",
+    "model_service/deploy/modal_app.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/4a/ad5b329b34/0/metadata.json",
+      "transcript": "/4a/ad5b329b34/0/full.jsonl",
+      "content_hash": "/4a/ad5b329b34/0/content_hash.txt",
+      "prompt": "/4a/ad5b329b34/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 90,
+    "cache_creation_tokens": 51128,
+    "cache_read_tokens": 28103521,
+    "output_tokens": 29956,
+    "api_call_count": 40
+  }
+}

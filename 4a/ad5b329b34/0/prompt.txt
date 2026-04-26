@@ -1,0 +1,128 @@
+is this normal?
+
+---
+
+[setup]   mimi loaded (1.3s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.2s)
+[setup] loading Moshi LM (this is the 7B weights)...
+[setup]   LM loaded to GPU (11.8s)
+[setup] constructing LMGen + warmup pass ...
+[setup]   LMGen + warmup ready (17.4s)
+[setup]   GPU after warmup: 19.9GB used / 42.4GB
+[setup] fetching voice prompts...
+[setup]   voices ready (0.1s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+[setup] priming Sarah persona + NATF1 voice...
+/app/personaplex/moshi/moshi/models/lm.py:979: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(path)
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+[setup]   primed in 35.8s
+[setup] saving post-prime streaming state to /tmp...
+[setup]   snapshot saved (2.2s) — GPU 19.9GB used / 42.4GB
+[setup] PersonaPlex ready — total 69.1s
+2026-04-26 03:45:45,343 [personaplex.process_call] INFO call 1a85814106694fcb: process_call started
+2026-04-26 03:45:45,752 [personaplex.process_call] INFO call 1a85814106694fcb: control WS connected
+2026-04-26 03:45:46,182 [personaplex.process_call] INFO call 1a85814106694fcb: SessionStart (voice=NATF1, prompt=4159 chars)
+2026-04-26 03:45:47,733 [personaplex.process_call] INFO call 1a85814106694fcb: persona restored from snapshot in 1.551s
+2026-04-26 03:45:47,760 [livekit] INFO livekit_ffi::server:153:livekit_ffi::server - initializing ffi server v0.12.52
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+2026-04-26 03:45:47,760 [livekit] INFO livekit_ffi::cabi:50:livekit_ffi::cabi - initializing ffi server v0.12.52
+2026-04-26 03:45:48,005 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-26 03:45:48,257 [personaplex.process_call] INFO call 1a85814106694fcb: joined LiveKit room
+2026-04-26 03:45:48,266 [personaplex.process_call] INFO call 1a85814106694fcb: SessionReady (2.92s)
+2026-04-26 03:45:55,021 [personaplex.process_call] INFO call 1a85814106694fcb: caller audio subscribed (id=sip_+4917684071300)
+2026-04-26 03:45:55,022 [personaplex.process_call] INFO call 1a85814106694fcb: scribe init — key_set=True, env_keys=['ELEVENLABS_API_KEY']
+2026-04-26 03:45:56,798 [personaplex.process_call] INFO call 1a85814106694fcb: Scribe STT stream opened
+2026-04-26 03:45:56,798 [personaplex.process_call] INFO call 1a85814106694fcb: starting PersonaPlex inference loop
+2026-04-26 03:45:56,936 [personaplex.process_call] INFO call 1a85814106694fcb: first PersonaPlex frame produced
+2026-04-26 03:46:08,959 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #1
+2026-04-26 03:46:09,987 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Hey. Could you help me claim an insurance file?'
+2026-04-26 03:46:21,760 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #2
+2026-04-26 03:46:23,171 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Yeah. My policy number is XYZ123. Yeah.'
+2026-04-26 03:46:25,200 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #3
+2026-04-26 03:46:27,336 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Okay.'
+2026-04-26 03:46:27,405 [personaplex.process_call] INFO call 1a85814106694fcb: speak directive — 19 tokens (reason=forced readback (attempt 1/3): policy_number unconfirmed)
+2026-04-26 03:46:31,039 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #4
+2026-04-26 03:46:34,160 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #5
+2026-04-26 03:46:35,167 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Yeah.'
+2026-04-26 03:46:36,960 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #6
+2026-04-26 03:46:37,909 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Correct.'
+2026-04-26 03:46:44,160 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #7
+2026-04-26 03:46:45,273 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: "That's correct."
+2026-04-26 03:46:47,833 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Yeah.'
+2026-04-26 03:46:51,759 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #8
+2026-04-26 03:46:52,797 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Every day.'
+2026-04-26 03:46:57,419 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: "That's weird. That's what you-"
+2026-04-26 03:46:59,759 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #9
+2026-04-26 03:47:01,199 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #10
+2026-04-26 03:47:06,479 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #11
+2026-04-26 03:47:11,999 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #12
+2026-04-26 03:47:12,527 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: "Memory's dead, huh? It is kind of like how... Not all, like, I think Hello?"
+2026-04-26 03:47:13,840 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #13
+2026-04-26 03:47:17,485 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Hello-o-o-o-o-o-o-o-o-o-o-o-o-o'
+2026-04-26 03:47:18,879 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #14
+2026-04-26 03:47:20,217 [personaplex.process_call] INFO call 1a85814106694fcb: scribe final: 'Hello. Hello.'
+2026-04-26 03:47:20,719 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #15
+2026-04-26 03:47:22,580 [personaplex.process_call] INFO call 1a85814106694fcb: caller turn boundary #16
+2026-04-26 03:47:24,690 [personaplex.process_call] INFO call 1a85814106694fcb: caller disconnected (identity=sip_+4917684071300)
+2026-04-26 03:47:24,691 [personaplex.process_call] INFO call 1a85814106694fcb: ending loop (caller left)
+2026-04-26 03:47:24,695 [personaplex.process_call] INFO call 1a85814106694fcb: inference loop ended after 1098 frames (99.4s)
+2026-04-26 03:47:24,705 [livekit] INFO livekit::room:1620:livekit::room - disconnected from room with reason: ClientInitiated
+2026-04-26 03:47:24,903 [personaplex.process_call] WARNING call 1a85814106694fcb: post-call rebuild failed: name 'time' is not defined
+2026-04-26 03:48:56,369 [personaplex.process_call] INFO call a346fb6a0492cfe7: process_call started
+2026-04-26 03:48:56,841 [personaplex.process_call] INFO call a346fb6a0492cfe7: control WS connected
+2026-04-26 03:48:57,003 [personaplex.process_call] INFO call a346fb6a0492cfe7: SessionStart (voice=NATF1, prompt=4159 chars)
+2026-04-26 03:48:59,009 [personaplex.process_call] INFO call a346fb6a0492cfe7: persona restored from snapshot in 2.005s
+2026-04-26 03:48:59,026 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-26 03:48:59,286 [personaplex.process_call] INFO call a346fb6a0492cfe7: joined LiveKit room
+2026-04-26 03:48:59,295 [personaplex.process_call] INFO call a346fb6a0492cfe7: SessionReady (2.92s)
+2026-04-26 03:49:06,008 [personaplex.process_call] INFO call a346fb6a0492cfe7: caller audio subscribed (id=sip_+4917684071300)
+2026-04-26 03:49:06,009 [personaplex.process_call] INFO call a346fb6a0492cfe7: scribe init — key_set=True, env_keys=['ELEVENLABS_API_KEY']
+2026-04-26 03:49:06,009 [personaplex.process_call] INFO call a346fb6a0492cfe7: Scribe STT stream opened
+2026-04-26 03:49:06,010 [personaplex.process_call] INFO call a346fb6a0492cfe7: starting PersonaPlex inference loop
+2026-04-26 03:49:06,168 [personaplex.process_call] INFO call a346fb6a0492cfe7: first PersonaPlex frame produced
+2026-04-26 03:49:08,330 [personaplex.process_call] INFO call a346fb6a0492cfe7: caller turn boundary #1
+2026-04-26 03:49:11,289 [personaplex.process_call] INFO call a346fb6a0492cfe7: caller turn boundary #2
+2026-04-26 03:49:11,926 [personaplex.process_call] INFO call a346fb6a0492cfe7: scribe final: "It's"
+2026-04-26 03:49:13,690 [personaplex.process_call] INFO call a346fb6a0492cfe7: caller turn boundary #3
+2026-04-26 03:49:14,868 [personaplex.process_call] INFO call a346fb6a0492cfe7: scribe final: '2023. Hi. How are you?'
+2026-04-26 03:49:16,319 [personaplex.process_call] INFO call
+
+---
+
+[Image #19]
+this is what i see in modal container? seems GPU memeory used still keep going
+but not sure about post-call rebuild in N.Ns — GPU 17-18GB used / 42.4GB
+
+---
+
+its not released at all? 
+ve it to me.'
+2026-04-26 03:50:16,706 [personaplex.process_call] INFO call a346fb6a0492cfe7: caller disconnected (identity=sip_+4917684071300)
+2026-04-26 03:50:16,707 [personaplex.process_call] INFO call a346fb6a0492cfe7: ending loop (caller left)
+2026-04-26 03:50:16,715 [personaplex.process_call] INFO call a346fb6a0492cfe7: inference loop ended after 883 frames (80.3s)
+2026-04-26 03:50:16,964 [personaplex.process_call] WARNING call a346fb6a0492cfe7: post-call rebuild failed: name 'time' is not defined
+⠙ Running (1/1 containers active)... View app at None
+
+---
+
+can you search for similar case?
+
+---
+
+Try TORCHDYNAMO_DISABLE=1
+
+---
+
+i also want you to look into the session 1a85814106694fcb and a346fb6a0492cfe7
+
+---
+
+do all three
+
+---
+
+pretty good : eb3a5ca46d18fa86
