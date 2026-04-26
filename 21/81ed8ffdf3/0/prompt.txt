@@ -1,0 +1,21 @@
+但是现在还是没有办法在UI里render整个消息记录？我们想要后面用realtime supabase to keep the the whole converstaion as well，你有什么想法吗？
+
+---
+
+yes, let's go with supabase, what should i setup for supabase?
+
+---
+
+can you update .env.example so i know what should i fill
+
+---
+
+okay, got it now
+
+---
+
+yes
+
+---
+
+can you just cp .env to frontend folder
