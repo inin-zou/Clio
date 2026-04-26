@@ -1,0 +1,1 @@
+also in the README.md beginning parts, says this is based on a E2E Full-Duplex real time voice model (PersonaPlex), insipired by Seeduplex (came up when, you should mention that), highlight the latency advatage over other stack (half-duplex/...) and mentioned our tool call/ RAG pipeline inspired by these 2 other paper (MoshiRAG and ASPIRin)
