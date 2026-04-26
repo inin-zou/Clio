@@ -1,0 +1,251 @@
+and let's focus back to the backend, about the voice model itself, because i want to relook into how we currently handle the RAG in voice streaming? and how ASR by Scribe get involved to create forfe token into streaming
+
+---
+
+we notice some key issues that make it feels robotics:
+1, sometimes, it will just say nothing, after user speaking, only if user say something else, it will then continue to reply
+2. it sometimes eager to speak even the user is speaking, it's trying to talk over user
+3. we want to double check with enity names and numbers, and it should only move on to next question if the user confirms they get it right
+
+---
+
+setup]   snapshot saved (2.6s) — GPU 19.9GB used / 42.4GB
+[setup] PersonaPlex ready — total 75.9s
+2026-04-26 02:44:15,580 [livekit.plugins.elevenlabs] ERROR Error in recv_task
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/log.py", line 17, in async_fn_logs
+    return await fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/plugins/elevenlabs/stt.py", line 431, in recv_task
+    raise APIStatusError(
+livekit.agents._exceptions.APIStatusError: message='ElevenLabs STT connection closed unexpectedly', status_code=1000, retryable=True, body=msg.data=1000 msg.extra=''
+2026-04-26 02:44:15,584 [asyncio] ERROR an error occurred during closing of asynchronous generator <async_generator object tee_peer at 0x2ae580683400>
+asyncgen: <async_generator object tee_peer at 0x2ae580683400>
+RuntimeError: aclose(): asynchronous generator is already running
+2026-04-26 02:44:15,584 [asyncio] ERROR an error occurred during closing of asynchronous generator <async_generator object tee_peer at 0x2ae62a6ff1c0>
+asyncgen: <async_generator object tee_peer at 0x2ae62a6ff1c0>
+RuntimeError: aclose(): asynchronous generator is already running
+2026-04-26 02:44:15,587 [livekit.agents] WARNING failed to recognize speech: message='ElevenLabs STT connection closed unexpectedly', status_code=1000, retryable=True, body=msg.data=1000 msg.extra='', retrying in 0.1s
+2026-04-26 02:44:16,014 [asyncio] ERROR Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x2ae62b3813a0>
+2026-04-26 02:44:16,014 [asyncio] ERROR Task was destroyed but it is pending!
+task: <Task pending name='STT._metrics_task' coro=<RecognizeStream._metrics_monitor_task() running at /usr/local/lib/python3.12/site-packages/livekit/agents/stt/stt.py:404> wait_for=<Future pending cb=[Task.task_wakeup()]>>
+2026-04-26 02:44:16,014 [asyncio] ERROR Task was destroyed but it is pending!
+task: <Task pending name='Task-756' coro=<RecognizeStream._main_task() running at /usr/local/lib/python3.12/site-packages/livekit/agents/stt/stt.py:382> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[RecognizeStream.__init__.<locals>.<lambda>() at /usr/local/lib/python3.12/site-packages/livekit/agents/stt/stt.py:312]>
+2026-04-26 02:44:16,014 [asyncio] ERROR Task was destroyed but it is pending!
+task: <Task pending name='Task-757' coro=<PersonaPlexService.process_call.<locals>._consume_scribe() running at /root/modal_app.py:710> wait_for=<Future pending cb=[Task.task_wakeup()]>>
+Exception ignored in: <coroutine object Chan.__anext__ at 0x2ae62a7ff030>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/aio/channel.py", line 176, in __anext__
+    return await self.recv()
+           ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/aio/channel.py", line 110, in recv
+    g.cancel()
+  File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+    self._check_closed()
+  File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+    raise RuntimeError('Event loop is closed')
+RuntimeError: Event loop is closed
+⠇ Running (1/1 containers active)... View
+
+---
+
+[setup]   LM loaded to GPU (13.5s)
+[setup] constructing LMGen ...
+[setup]   LMGen ready (0.0s)
+[setup] warmup pass (compiles CUDA graphs)...
+[setup]   warmup done (16.4s) — GPU 19.9GB used / 42.4GB
+[setup] fetching voice prompts...
+[setup]   voices ready (0.2s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+[setup] priming Sarah persona + NATF1 voice...
+/app/personaplex/moshi/moshi/models/lm.py:979: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(path)
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+[setup]   primed in 35.7s
+[setup] saving post-prime streaming state to /tmp...
+[setup]   snapshot saved (2.3s) — GPU 19.9GB used / 42.4GB
+[setup] PersonaPlex ready — total 70.2s
+[setup] REDACTED:True
+[setup] GPU memory at start: 42.0GB free / 42.4GB total
+[setup] loading Mimi codec from nvidia/personaplex-7b-v1 ...
+[setup]   mimi loaded (1.9s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.2s)
+[setup] loading Moshi LM (this is the 7B weights)...
+
+why it ended up in a loop now like before
+
+---
+
+but each new call should trigger a new container right?
+
+---
+
+but is that possible to release the memory, except our snapshot after each call finish
+
+---
+
+, Fritz. It was at the Delta Campus in Berlin.'
+2026-04-26 02:59:17,123 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #13
+2026-04-26 02:59:22,135 [personaplex.process_call] INFO call 02497f48883e30f9: speak directive — 27 tokens (reason=wrap-up gate: caller appears done but critical slot(s) missing: ['reporter_role', 'incident_datetime', 'any_injuries', 'driver_was_policyholder', 'own_vehicle_damage.drivable'])
+2026-04-26 02:59:25,284 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #14
+2026-04-26 02:59:26,979 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #15
+2026-04-26 02:59:28,218 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'No, it was the Delta camp.'
+2026-04-26 02:59:32,484 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #16
+2026-04-26 02:59:33,655 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Um, I do.'
+2026-04-26 02:59:35,923 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #17
+2026-04-26 02:59:37,283 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #18
+2026-04-26 02:59:39,417 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'I do have it.'
+2026-04-26 02:59:41,445 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #19
+2026-04-26 02:59:42,557 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Yes.'
+2026-04-26 02:59:45,203 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #20
+2026-04-26 02:59:46,456 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: '0176.'
+2026-04-26 02:59:50,883 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #21
+2026-04-26 02:59:52,226 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Sorry.'
+2026-04-26 02:59:55,049 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Okay.'
+2026-04-26 02:59:56,723 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #22
+2026-04-26 03:00:00,140 [personaplex.process_call] INFO call 02497f48883e30f9: speak directive — 18 tokens (reason=forced readback (attempt 1/3): policy_number unconfirmed)
+2026-04-26 03:00:01,684 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #23
+2026-04-26 03:00:05,010 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #24
+2026-04-26 03:00:06,339 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Yeah.'
+2026-04-26 03:00:10,803 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #25
+2026-04-26 03:00:14,803 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #26
+2026-04-26 03:00:16,153 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'What?'
+2026-04-26 03:00:16,564 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #27
+2026-04-26 03:00:17,997 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: '43.'
+2026-04-26 03:00:19,364 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #28
+2026-04-26 03:00:22,328 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #29
+2026-04-26 03:00:30,457 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #30
+2026-04-26 03:00:32,079 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: "Yeah, that's my license number."
+2026-04-26 03:00:36,236 [personaplex.process_call] INFO call 02497f48883e30f9: speak directive — 24 tokens (reason=compliance deadline (180s) hit for incident_datetime)
+2026-04-26 03:00:37,295 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #31
+2026-04-26 03:00:40,742 [personaplex.process_call] INFO call 02497f48883e30f9: speak directive — 14 tokens (reason=forced readback (attempt 1/3): license_plate unconfirmed)
+2026-04-26 03:00:41,404 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #32
+2026-04-26 03:00:42,826 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: "And what's your name? Yeah, I'm outside waiting. I'm sure I will be able to get "
+2026-04-26 03:00:43,803 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #33
+2026-04-26 03:00:44,997 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Thank you. Bye.'
+2026-04-26 03:00:46,594 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Bye.'
+2026-04-26 03:00:48,204 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #34
+2026-04-26 03:00:49,484 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #35
+2026-04-26 03:00:54,124 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #36
+2026-04-26 03:00:59,964 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #37
+2026-04-26 03:01:01,313 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'It was at 5:00 a.m.'
+2026-04-26 03:01:03,343 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'It was-'
+2026-04-26 03:01:05,632 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Sorry?'
+2026-04-26 03:01:05,644 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #38
+2026-04-26 03:01:07,964 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #39
+2026-04-26 03:01:09,225 [personaplex.process_call] INFO call 02497f48883e30f9: scribe final: 'Hello. Um...'
+2026-04-26 03:01:10,444 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #40
+2026-04-26 03:01:11,062 [personaplex.process_call] INFO call 02497f48883e30f9: speak directive — 57 tokens (reason=forced readback (attempt 1/3): incident_datetime unconfirmed)
+2026-04-26 03:01:13,853 [personaplex.process_call] INFO call 02497f48883e30f9: caller turn boundary #41
+2026-04-26 03:01:18,005 [personaplex.process_call] ERROR call 02497f48883e30f9: process_call crashed: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 38.42 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 48.30 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 967, in process_call
+    agent_pcm_t = self.mimi.decode(tokens[:, 1:9])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/models/compression.py", line 417, in decode
+    out = self.decoder(emb)
+          ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/utils/compile.py", line 70, in _wrapped
+    return fun(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 415, in forward
+    y = self.model(z)
+        ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/container.py", line 219, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 115, in forward
+    return self.add(u, v)
+           ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 455, in forward
+    x = torch.cat([prev_x, x], dim=-1)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 38.42 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 48.30 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-04-26 03:01:18,050 [livekit] INFO livekit::room:1620:livekit::room - disconnected from room with reason: ClientInitiated
+2026-04-26 03:01:18,422 [personaplex.process_call] INFO call 02497f48883e30f9: post-call GPU 42.4GB used / 42.4GB
+
+---
+
+also, can you check the msg history in this session: 02497f48883e30f9
+
+---
+
+yes do all three
+
+---
+
+conversation reset doest seems working after the old call is finished:
+2026-04-26 03:17:25,795 [personaplex.process_call] INFO call 214a2af066a1b899: post-call GPU 42.4GB used / 42.4GB
+Done loading text prompt.
+Done loading audio silence.
+[setup]   primed in 35.8s
+[setup] saving post-prime streaming state to /tmp...
+[setup]   snapshot saved (2.5s) — GPU 19.9GB used / 42.4GB
+[setup] PersonaPlex ready — total 74.9s
+2026-04-26 03:18:06,480 [livekit.plugins.elevenlabs] ERROR Error in recv_task
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/log.py", line 17, in async_fn_logs
+    return await fn(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/plugins/elevenlabs/stt.py", line 431, in recv_task
+    raise APIStatusError(
+livekit.agents._exceptions.APIStatusError: message='ElevenLabs STT connection closed unexpectedly', status_code=1000, retryable=True, body=msg.data=1000 msg.extra=''
+2026-04-26 03:18:06,502 [asyncio] ERROR an error occurred during closing of asynchronous generator <async_generator object tee_peer at 0x2b09eaa06d40>
+asyncgen: <async_generator object tee_peer at 0x2b09eaa06d40>
+RuntimeError: aclose(): asynchronous generator is already running
+2026-04-26 03:18:06,503 [asyncio] ERROR an error occurred during closing of asynchronous generator <async_generator object tee_peer at 0x2b09eaa069e0>
+asyncgen: <async_generator object tee_peer at 0x2b09eaa069e0>
+RuntimeError: aclose(): asynchronous generator is already running
+2026-04-26 03:18:06,505 [livekit.agents] WARNING failed to recognize speech: message='ElevenLabs STT connection closed unexpectedly', status_code=1000, retryable=True, body=msg.data=1000 msg.extra='', retrying in 0.1s
+2026-04-26 03:18:06,780 [asyncio] ERROR Unclosed client session
+client_session: <aiohttp.client.ClientSession object at 0x2b09404ed9a0>
+2026-04-26 03:18:06,781 [asyncio] ERROR Task was destroyed but it is pending!
+task: <Task pending name='Task-51' coro=<PersonaPlexService.process_call.<locals>._consume_scribe() running at /root/modal_app.py:728> wait_for=<Future pending cb=[Task.task_wakeup()]>>
+2026-04-26 03:18:06,781 [asyncio] ERROR Task was destroyed but it is pending!
+task: <Task pending name='STT._metrics_task' coro=<RecognizeStream._metrics_monitor_task() running at /usr/local/lib/python3.12/site-packages/livekit/agents/stt/stt.py:404> wait_for=<Future pending cb=[Task.task_wakeup()]>>
+2026-04-26 03:18:06,781 [asyncio] ERROR Task was destroyed but it is pending!
+task: <Task pending name='Task-50' coro=<RecognizeStream._main_task() running at /usr/local/lib/python3.12/site-packages/livekit/agents/stt/stt.py:382> wait_for=<Future pending cb=[Task.task_wakeup()]> cb=[RecognizeStream.__init__.<locals>.<lambda>() at /usr/local/lib/python3.12/site-packages/livekit/agents/stt/stt.py:312]>
+Exception ignored in: <coroutine object Chan.__anext__ at 0x2b09eaaef5e0>
+Traceback (most recent call last):
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/aio/channel.py", line 176, in __anext__
+    return await self.recv()
+           ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/aio/channel.py", line 110, in recv
+    g.cancel()
+  File "/usr/local/lib/python3.12/asyncio/base_events.py", line 799, in call_soon
+    self._check_closed()
+  File "/usr/local/lib/python3.12/asyncio/base_events.py", line 545, in _check_closed
+    raise RuntimeError('Event loop is closed')
+RuntimeError: Event loop is closed
+⠏ Running (1/1 containers active)... View app at None
+
+---
+
+we still have a whole day man :) go for Destroy + recreate lm_gen at end of call
