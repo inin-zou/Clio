@@ -1,0 +1,38 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "ee219cafb524",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 76,
+  "files_touched": [
+    ".env.example",
+    "backend/app/control/eventbus.py",
+    "backend/app/control/messages.py",
+    "backend/app/control/orchestrator.py",
+    "backend/app/control/registry.py",
+    "backend/app/control/server.py",
+    "backend/app/control/sse.py",
+    "backend/app/telephony/livekit_sip.py",
+    "backend/app/telephony/twilio_webhook.py",
+    "backend/tests/test_twilio_webhook.py",
+    "model_service/deploy/modal_app.py",
+    "model_service/deploy/modal_backend.py",
+    "pyproject.toml",
+    "uv.lock"
+  ],
+  "sessions": [
+    {
+      "metadata": "/ee/219cafb524/0/metadata.json",
+      "transcript": "/ee/219cafb524/0/full.jsonl",
+      "content_hash": "/ee/219cafb524/0/content_hash.txt",
+      "prompt": "/ee/219cafb524/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 1837,
+    "cache_creation_tokens": 676833,
+    "cache_read_tokens": 74800912,
+    "output_tokens": 292155,
+    "api_call_count": 257
+  }
+}

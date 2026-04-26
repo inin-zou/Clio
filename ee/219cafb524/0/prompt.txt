@@ -1,0 +1,2550 @@
+/init
+
+---
+
+you should already know what still hasn't been done right? and you understand what we should do next?
+
+---
+
+诚实清单。让我把 demo 能跑起来 需要的所有事和 当前已经存在的洞 都列出来。
+
+  没写 / 没做完的关键事
+
+  🔴 Demo 必须的 (没这些电话打不通)
+
+  1. Backend Twilio webhook handler — 完全没写
+  - 接 Twilio 的 POST /twilio/voice
+  - Mint LiveKit room name + agent participant token (用 livekit-api)
+  - register_pending_call() 把 setup 存进 PENDING_CALLS
+  - Spawn Modal process_call.spawn(...) 传 backend_control_url
+  - 返回 TwiML 告诉 Twilio 把 SIP 音频转给 LiveKit Cloud
+  - 估计 ~200 行 + livekit-api 依赖
+
+  2. Backend 被部署到 Modal 能 reach 的地方 — 没做
+  - 目前 backend 只在 localhost:8000 跑
+  - Modal container 不可能连 localhost
+  - 需要: ngrok 临时暴露 (dev) 或者部署到 Render/Vercel/Modal CPU (prod)
+  - 必须给 Modal 设置 BACKEND_CONTROL_URL=wss://... 环境变量
+
+  3. Twilio Voice 号码的 webhook URL — 没配
+  - Twilio Console: Phone Numbers → 选你的号 → Voice Configuration
+  - 把 "A Call Comes In" 设成你的 backend URL https://<...>/twilio/voice
+  - 你之前说 SIP trunk 配好了, 但 webhook URL 是另一回事
+
+  4. process_call() 端到端从未跑过
+  我们验证了:
+  - ✅ Image build
+  - ✅ setup() 加载 PersonaPlex + voices
+  - ✅ 文件 syntax 正确
+
+  我们 没 验证 (代码可能有 bug):
+  - ⚠️ lm_gen.load_voice_prompt_embeddings(.pt path string) 这个 API 形状
+  - ⚠️ lm_gen.text_prompt_tokens = list[int] 还是 tensor
+  - ⚠️ LiveKit Agent 接 SIP-sourced room 的细节
+  - ⚠️ Frame 大小是否匹配 (LiveKit 真给的不一定是 80ms)
+  - ⚠️ VAD 0.005 RMS 阈值在真 phone audio 下合不合理
+  - ⚠️ Forced text token tensor 类型 (long vs int32?)
+
+  🟡 Demo 质量 (没这些 demo 会怪怪的)
+
+  5. ReadbackOutcome 检测 — 没写
+  - Sarah 读回 entity 后, 我们需要 pattern match caller 的"yes/correct"vs"no/actually"
+  - 当前: backend 接收 ReadbackOutcome 但 没人发过这个 message
+  - 需要在 process_call 里加 logic: 当 SpeakDirective 是 read-back 类型, 监听后续 caller
+  转录, 决定 confirmed/corrected/unclear
+  - 估计 ~80 行
+
+  6. Rescue clip pipeline — 没写
+  - 预录 "you're breaking up" 音频 (用 PersonaPlex 离线生成, 6-10 个 clip)
+  - modal_app.py 的 RescueClipDirective handler 是 TODO
+  - 需要: Server-side audio gating (mute PersonaPlex output 几秒) + 流播预录 WAV
+  - 估计 ~50 行 + 录音工作
+
+  7. Twilio 'please hold' preamble — 没写
+  TwiML 里加:
+  <Response>
+      <Say>Thank you for calling Allianz Claims, please hold.</Say>
+      <Dial><Sip>...</Sip></Dial>
+  </Response>
+  讨论过, 但 webhook handler 没写所以还没有。
+
+  8. Modal Demo Mode 切换 — 没做
+  - 当前 CLIO_DEMO_MODE=0 (dev 模式), min_containers=0
+  - 第一个 caller 会 cold start 80 秒
+  - 必须在 demo 前 CLIO_DEMO_MODE=1 modal deploy ...
+
+  🟢 不阻塞 demo, 但 nice to have
+
+  9. Frontend 监控 UI — 完全没写. demo 可以光看 backend 终端 log 替代
+  10. Tools (synthetic dialogue gen, eval runner) — 没写. 不影响 demo
+  11. Scribe v2 ASR 集成 — Step 4b deferred, 影响 entity 准确率但 read-back 协议补救
+  12. Voice 测试 + persona 调优 — 没人听过 Sarah 真说话什么样
+
+  离 "电话打通" 的最小路径
+
+  这是 必做的 critical path:
+
+  [Step A] Backend Twilio webhook handler (~3h 写)
+  [Step B] ngrok 暴露 backend (~10min, 一行命令)
+  [Step C] Twilio Console 配 webhook URL (~5min)
+  [Step D] 第一次 test call → 看炸在哪 (~30min - 半天 debug)
+  [Step E] 修 bug 重测 (循环)
+
+  最快 1 个工作日, 包括 debug 时间, 假设没遇到 PersonaPlex API 形状这种基础 bug. 真实可能要
+  1-2 天。
+
+this is note from last session, do you see anything missing?
+
+---
+
+yes
+
+---
+
+we already fill all the .env things required in .env.example
+
+---
+
+why we use ngrok??
+
+---
+
+what you gonna deploy with modals as cpu fastapi app
+
+---
+
+so the twilio app is hosted on modal will make the inbound call lowest latency?
+
+---
+
+but we already upload as secrets to our modal
+
+---
+
+i dont understand what do you mean by "<from-lk-sip-inbound-trunk-create-output>"
+
+---
+
+yes
+
+---
+
+okay, what's left to do
+
+---
+
+[Image #1] what should i do?
+
+---
+
+just add LIVEKIT_SIP_URI to .env, and [Image #2] didn't see the Telephony tab has the  trunk listed with the Twilio number
+
+---
+
+[Image #3]
+
+already done "SIP trunks" in the sidebar and "Dispatch rules", but "Phone numbers" shows nothing, [Image #4]
+
+---
+
+…/Clio main !?
+❯ modal deploy model_service/deploy/modal_backend.py
+╭──────────────────────────── Traceback (most recent call last) ─────────────────────────────╮
+│ /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_ba │
+│ ckend.py:83 in <module>                                                                    │
+│                                                                                            │
+│    82                                                                                      │
+│ ❱  83 @app.function(                                                                       │
+│    84 │   secrets=[                                                                        │
+│                                                                                            │
+│ /opt/homebrew/Caskroom/miniforge/base/lib/python3.12/site-packages/modal/app.py:782 in     │
+│ function                                                                                   │
+│                                                                                            │
+│    781 │   │   │   if max_inputs > 1:                                                      │
+│ ❱  782 │   │   │   │   raise InvalidError("Only `max_inputs=1` is currently supported")    │
+│    783 │   │   │   deprecation_warning(                                                    │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
+InvalidError: Only `max_inputs=1` is currently supported
+
+…/Clio main !?
+
+---
+
+Built image im-1LKXdv56HzqrDAhayYBQdz in 39.42s
+
+
+╭─ Error ────────────────────────────────────────────────────────────────────────────────────╮
+│ An image tried to run a build step after using `image.add_local_*` to include local files. │
+│                                                                                            │
+│ Run `image.add_local_*` commands last in your image build to avoid rebuilding images with  │
+│ every local file change. Modal will then add these files to containers on startup instead, │
+│ saving build time.                                                                         │
+│ If you need to run other build steps after adding local files, set `copy=True` to copy the │
+│ files directly into the image, at the expense of some added build time.                    │
+│                                                                                            │
+│ Example:                                                                                   │
+│                                                                                            │
+│ my_image = (                                                                               │
+│     Image.debian_slim()                                                                    │
+│     .add_local_file("data.json", copy=True)                                                │
+│     .run_commands("python -m mypak")  # this now works!                                    │
+│ )                                                                                          │
+│
+
+---
+
+✓ Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_ba
+│   ckend.py
+├── 🔨 Created mount /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/data
+├── 🔨 Created mount PythonPackage:backend
+└── 🔨 Created web function fastapi_app =>
+    https://dreamonzouk--clio-backend-fastapi-app.modal.run
+✓ App deployed in 4.604s! 🎉
+
+View Deployment: https://modal.com/apps/dreamonzouk/main/deployed/clio-backend
+
+---
+
+…/Clio main !?5s
+❯ modal run model_service/deploy/modal_backend.py::print_url
+✓ Initialized. View run at https://modal.com/apps/dreamonzouk/main/REDACTED
+✓ Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_ba
+│   ckend.py
+├── 🔨 Created mount /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/data
+├── 🔨 Created mount PythonPackage:backend
+└── 🔨 Created web function fastapi_app =>
+    https://dreamonzouk--clio-backend-fastapi-app-dev.modal.run
+backend URL : https://dreamonzouk--clio-backend-fastapi-app-dev.modal.run
+twilio voice: https://dreamonzouk--clio-backend-fastapi-app-dev.modal.run/twilio/voice
+twilio stat : https://dreamonzouk--clio-backend-fastapi-app-dev.modal.run/twilio/status
+ws control  : wss://dreamonzouk--clio-backend-fastapi-app-dev.modal.run/control/<call_id>
+
+Set as Modal secret so the backend tells GPU containers to connect here:
+  modal secret create clio-backend-cfg
+BACKEND_PUBLIC_WS_URL=wss://dreamonzouk--clio-backend-fastapi-app-dev.modal.run --force
+  modal deploy model_service/deploy/modal_backend.py  # redeploy
+Stopping app - local entrypoint completed.
+✓ App completed. View run at https://modal.com/apps/dreamonzouk/main/REDACTED
+
+---
+
+should i rerun modal_backend.py?
+
+---
+
+[Image #9]
+
+---
+
+Traceback (most recent call last):
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Runner failed with exception: IndexError(2)
+
+---
+
+…/Clio main !?2s
+❯ curl https://dreamonzouk--clio-backend-fastapi-app.modal.run/health
+{"ok":true,"pending_calls":0,"active_calls":0}%
+
+---
+
+…/Clio main !?2s
+❯ modal app logs clio-backend --follow
+Usage: modal app logs [OPTIONS] [APP_IDENTIFIER]
+Try 'modal app logs -h' for help.
+╭─ Error ────────────────────────────────────────────────────────────────────────────────────╮
+│ No such option: --follow                                                                   │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
+
+…/Clio main !?
+❯ modal app logs personaplex-clio --follow
+Usage: modal app logs [OPTIONS] [APP_IDENTIFIER]
+Try 'modal app logs -h' for help.
+╭─ Error ────────────────────────────────────────────────────────────────────────────────────╮
+│ No such option: --follow                                                                   │
+╰────────────────────────────────────────────────────────────────────────────────────────────╯
+
+---
+
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Traceback (most recent call last):
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Runner failed with exception: IndexError(2)
+Traceback (most recent call last):
+Runner failed with exception: IndexError(2)
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Traceback (most recent call last):
+Runner failed with exception: IndexError(2)
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Traceback (most recent call last):
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Runner failed with exception: IndexError(2)
+Traceback (most recent call last):
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Runner failed with exception: IndexError(2)
+Traceback (most recent call last):
+Runner failed with exception: IndexError(2)
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Traceback (most recent call last):
+Runner failed with exception: IndexError(2)
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Runner failed with exception: IndexError(2)
+Traceback (most recent call last):
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+Traceback (most recent call last):
+Runner failed with exception: IndexError(2)
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_container_entrypoint.py", line 336, in main
+    service = import_single_function_service(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/pkg/modal/_runtime/user_code_imports.py", line 475, in import_single_function_service
+    module = importlib.import_module(function_def.module_name)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/importlib/__init__.py", line 90, in import_module
+    return _bootstrap._gcd_import(name[level:], package, level)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<frozen importlib._bootstrap>", line 1387, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+  File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+  File "<frozen importlib._bootstrap_external>", line 999, in exec_module
+  File "<frozen importlib._bootstrap>", line 488, in _call_with_frames_removed
+  File "/root/modal_backend.py", line 52, in <module>
+    REPO_ROOT = Path(__file__).resolve().parents[2]
+                ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^
+  File "/usr/local/lib/python3.12/pathlib.py", line 282, in __getitem__
+    raise IndexError(idx)
+IndexError: 2
+    GET /health -> 200 OK  (duration: 108.5 ms, execution: 16.8 ms)
+    GET /twilio/voice -> 405 Method Not Allowed  (duration: 149.1 ms, execution: 45.8 ms)
+    GET /favicon.ico -> 404 Not Found  (duration: 121.5 ms, execution: 33.3 ms)
+⠴ Running (1/1 containers active)... View app at None
+
+---
+
+IndexError: 2
+    GET /health -> 200 OK  (duration: 108.5 ms, execution: 16.8 ms)
+    GET /twilio/voice -> 405 Method Not Allowed  (duration: 149.1 ms, execution: 45.8 ms)
+    GET /favicon.ico -> 404 Not Found  (duration: 121.5 ms, execution: 33.3 ms)
+2026-04-25 21:57:18,115 [clio.telephony] WARNING Twilio signature mismatch for https://dreamonzouk--clio-backend-fastapi-app.modal.run/twilio/voice
+   POST /twilio/voice -> 403 Forbidden  (duration: 152.8 ms, execution: 82.2 ms)
+2026-04-25 21:57:22,382 [clio.telephony] WARNING Twilio signature mismatch for https://dreamonzouk--clio-backend-fastapi-app.modal.run/twilio/status
+   POST /twilio/status -> 403 Forbidden  (duration: 129.3attempt_dur=61.11, time_since_heartbeat_success=61.11, error=ConnectionError('Deadline exceeded'))
+[setup] loading Mimi codec from nvidia/personaplex-7b-v1 ...
+[setup]   mimi loaded (2.2s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.2s)
+[setup] loading Moshi LM (this is the 7B weights)...
+[setup]   LM loaded to GPU (10.5s)
+[setup] constructing LMGen ...
+[setup]   LMGen ready (0.1s)
+[setup] warmup pass (compiles CUDA graphs)...
+[setup]   warmup done (14.1s)
+[setup] fetching voice prompts...
+[setup]   voices ready (0.1s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+[setup] PersonaPlex ready — total 27.3s
+Runner failed with exception: Runner has been shutting down for too long (grace period: 30 seconds)
+⠸ Running (1/1 containers active)... View app at None
+
+---
+
+why it just hang after saying "thanks for calling Aliance ...", instead of going to the phone call
+
+---
+
+Original line:
+  process_call.spawn(
+2026-04-25 22:02:11,125 [clio.telephony] INFO spawned Modal process_call for call_id=d584b069a230efce room=clio-d584b069a230efce
+   POST /twilio/voice -> 200 OK  (duration: 271.9 ms, execution: 147.8 ms)
+2026-04-25 22:02:15,187 [clio.telephony] INFO call status: CallSid=CAaaf05b8dfecc38689a11b22f735040ed status=completed duration=8s
+   POST /twilio/status -> 204 No Content  (duration: 111.2 ms, execution: 43.2 ms)
+2026-04-25 22:02:17,073 [clio.control.server] INFO call 238e9aa9327d7706: WebSocket disconnected
+2026-04-25 22:02:17,077 [clio.control] INFO call 238e9aa9327d7706: session JSON saved to /root/data/sessions/238e9aa9327d7706.json
+CONNECT /control/238e9aa9327d7706 -> 101 Switching Protocols  (duration: 65.4 s, execution: 65.4 s)
+2026-04-25 22:02:52,682 [clio.control] INFO call d584b069a230efce: ready after 35.3s
+⠋ Running (1/1 containers active)... View app at None
+
+
+Runner failed with exception: Runner has been shutting down for too long (grace period: 30 seconds)
+/app/personaplex/moshi/moshi/models/lm.py:979: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(path)
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+[setup] loading Mimi codec from nvidia/personaplex-7b-v1 ...
+[setup]   mimi loaded (2.5s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.3s)
+[setup] loading Moshi LM (this is the 7B weights)...
+[setup]   LM loaded to GPU (14.8s)
+[setup] constructing LMGen ...
+[setup]   LMGen ready (0.1s)
+[setup] warmup pass (compiles CUDA graphs)...
+Done loading audio silence.
+[setup]   warmup done (21.0s)
+[setup] fetching voice prompts...
+[setup]   voices ready (0.2s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+[setup] PersonaPlex ready — total 39.1s
+Done loading text prompt.
+Done loading audio silence.
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+⠇ Running (1/1 containers active)... View app at None
+
+---
+
+…/Clio main !?4m22s
+❯ modal app list | grep personaplex-clio
+
+…/Clio main !?
+❯
+
+---
+
+❯ modal app list
+                                                 Apps
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━
+┃ App ID                    ┃ Description     ┃ State    ┃ Tasks ┃ Created at       ┃ Stopped
+┡━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━
+│ ap-HAnBfwM1pFXQDmROdhBWIC │ personaplex     │ deployed │ 0     │ 2026-04-25 12:52 │
+│                           │                 │          │       │ CEST             │
+│ ap-TXz9ppLKruhEjsy7hWmpmc │ personaplex-cl… │ deployed │ 1     │ 2026-04-25 21:53 │
+│                           │                 │          │       │ CEST             │
+│ ap-VgjL6VoHwoSdqCd75GDFY4 │ clio-backend    │ deployed │ 1     │ 2026-04-25 23:46 │
+│                           │                 │          │       │ CEST             │
+│ REDACTED │ clio-backend    │ stopped  │ 0     │ 2026-04-25 23:47 │ 2026-04-
+│                           │                 │          │       │ CEST             │ 23:47 CE
+│ ap-P9Yq4xiG1MUaQXbTIqWiDq │ clio-backend    │ stopped  │ 0     │ 2026-04-25 23:44 │ 2026-04-
+│                           │                 │          │       │ CEST             │ 23:45 CE
+│ ap-JDmRDPL5MFVlX6J3SHAiMS │ personaplex-cl… │ stopped  │ 0     │ 2026-04-25 22:29 │ 2026-04-
+│                           │                 │          │       │ CEST             │ 22:31 CE
+└───────────────────────────┴─────────────────┴──────────┴───────┴──────────────────┴─────────
+
+…/Clio main !?
+
+---
+
+ab55bff room=clio-a0f99dcfdab55bff
+   POST /twilio/voice -> 200 OK  (duration: 320.4 ms, execution: 255.3 ms)
+2026-04-25 22:06:06,445 [clio.telephony] INFO call status: CallSid=CAd609a119231149e744e24223789b0b63 status=completed duration=7s
+   POST /twilio/status -> 204 No Content  (duration: 5.18 s, execution: 35.2 ms)
+⠹ Running (2/2 containers active)... View app at None
+
+---
+
+it shows nothing :
+[setup]   voices ready (0.2s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+[setup] PersonaPlex ready — total 39.1s
+Done loading text prompt.
+Done loading audio silence.
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+Done loading audio silence.
+⠏ Running (1/1 containers active)... View app at None
+
+in the backend:
+Original line:
+  process_call.spawn(
+2026-04-25 22:07:44,094 [clio.telephony] INFO spawned Modal process_call for call_id=19d62ed68a4c5e9c room=clio-19d62ed68a4c5e9c
+   POST /twilio/voice -> 200 OK  (duration: 181.1 ms, execution: 100.2 ms)
+2026-04-25 22:07:52,795 [clio.telephony] INFO call status: CallSid=CA1ca0ae57db3d60c51ced8332543fffe5 status=completed duration=8s
+   POST /twilio/status -> 204 No Content  (duration: 4.70 s, execution: 33.2 ms)
+⠹ Running (2/2 containers active)... View app at None
+
+---
+
+[setup]   voices ready (0.2s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+[setup] PersonaPlex ready — total 39.1s
+Done loading text prompt.
+Done loading audio silence.
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+[setup] loading Mimi codec from nvidia/personaplex-7b-v1 ...
+Done loading audio silence.
+[setup]   mimi loaded (2.3s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.3s)
+[setup] loading Moshi LM (this is the 7B weights)...
+[setup]   LM loaded to GPU (16.0s)
+[setup] constructing LMGen ...
+[setup]   LMGen ready (0.1s)
+[setup] warmup pass (compiles CUDA graphs)...
+⠇ Running (1/3 containers active)... View app at None
+
+
+2026-04-25 22:10:32,061 [clio.telephony] INFO spawned Modal process_call for call_id=c633eade0ffec97b room=clio-c633eade0ffec97b
+   POST /twilio/voice -> 200 OK  (duration: 486.7 ms, execution: 408.9 ms)
+2026-04-25 22:10:36,021 [clio.telephony] INFO call status: CallSid=CAf24178194516d9131f49bbac2a0a4a95 status=completed duration=12s
+   POST /twilio/status -> 204 No Content  (duration: 103.7 ms, execution: 31.5 ms)
+2026-04-25 22:10:47,524 [clio.control] INFO call a25b00d8f0102eed: ready after 35.3s
+⠹ Running (2/2 containers active)... View app at None
+
+why it just hangup
+
+M1']...
+[setup] PersonaPlex ready — total 43.4s
+2026-04-25 22:10:56,950 [personaplex.process_call] INFO call c633eade0ffec97b: process_call started
+2026-04-25 22:10:57,187 [personaplex.process_call] INFO call c633eade0ffec97b: control WS connected
+2026-04-25 22:10:57,188 [personaplex.process_call] INFO call c633eade0ffec97b: SessionStart (voice=NATF1, prompt=3198 chars)
+/app/personaplex/moshi/moshi/models/lm.py:979: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(path)
+
+---
+
+but any better way to avoid the waiting? cant we make it kv cache?
+
+---
+
+yes, plz do that
+
+---
+
+…/Clio main !?2s
+❯ modal run model_service/deploy/modal_app.py::introspect_streaming_state
+✓ Initialized. View run at https://modal.com/apps/dreamonzouk/main/ap-zgTOQjzH1ryhHTP2khgZEt
+✓ Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_ap
+│   p.py
+└── 🔨 Created function PersonaPlexService.*.
+[setup] loading Mimi codec from nvidia/personaplex-7b-v1 ...
+[setup]   mimi loaded (2.5s)
+[setup] loading text tokenizer ...
+[setup]   tokenizer loaded (0.2s)
+[setup] loading Moshi LM (this is the 7B weights)...
+[setup]   LM loaded to GPU (15.7s)
+[setup] constructing LMGen ...
+[setup]   LMGen ready (0.1s)
+[setup] warmup pass (compiles CUDA graphs)...
+[setup]   warmup done (22.4s)
+[setup] fetching voice prompts...
+[setup]   voices ready (0.1s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+{
+  "lm_gen": {
+    "label": "lm_gen",
+    "type": "LMGen",
+    "module": "moshi.models.lm",
+    "attrs": [
+      {
+        "name": "_apply_named_streaming",
+        "signature": "(fn: Any)",
+        "kind": "method"
+      },
+      {
+        "name": "_encode_voice_prompt_frames",
+        "signature": "(mimi)",
+        "kind": "method"
+      },
+      {
+        "name": "_init_streaming_state",
+        "signature": "(batch_size: int) -> moshi.models.lm._LMGenState",
+        "kind": "method"
+      },
+      {
+        "name": "_load_from_state_dict",
+        "signature": "(state_dict, prefix, local_metadata, strict, missing_keys,
+unexpected_keys, error_msgs)",
+        "kind": "method"
+      },
+      {
+        "name": "_load_state_dict_post_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_load_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_register_load_state_dict_pre_hook",
+        "signature": "(hook, with_module=False)",
+        "kind": "method"
+      },
+      {
+        "name": "_register_state_dict_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "_save_to_state_dict",
+        "signature": "(destination, prefix, keep_vars)",
+        "kind": "method"
+      },
+      {
+        "name": "_start_streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "_state_dict_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_step_text_prompt",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "_step_text_prompt_async",
+        "signature": "(is_alive: Optional[Callable] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "_step_text_prompt_core",
+        "signature": "() -> Iterator[NoneType]",
+        "kind": "method"
+      },
+      {
+        "name": "_step_voice_prompt",
+        "signature": "(mimi)",
+        "kind": "method"
+      },
+      {
+        "name": "_step_voice_prompt_async",
+        "signature": "(mimi, is_alive: Optional[Callable] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "_step_voice_prompt_core",
+        "signature": "(mimi) -> Iterator[NoneType]",
+        "kind": "method"
+      },
+      {
+        "name": "_step_voice_prompt_frame",
+        "signature": "(voice_prompt_frame_tokens: torch.Tensor, saved_embeddings:
+Optional[list[torch.Tensor]] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "_stop_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "_streaming_propagate",
+        "kind": "bool"
+      },
+      {
+        "name": "_streaming_state",
+        "kind": "_LMGenState"
+      },
+      {
+        "name": "get_extra_state",
+        "signature": "() -> Any",
+        "kind": "method"
+      },
+      {
+        "name": "get_streaming_state",
+        "signature": "() -> dict[str, typing.Any]",
+        "kind": "method"
+      },
+      {
+        "name": "is_streaming",
+        "kind": "bool"
+      },
+      {
+        "name": "load_state_dict",
+        "signature": "(state_dict: Mapping[str, Any], strict: bool = True, assign: bool =
+False)",
+        "kind": "method"
+      },
+      {
+        "name": "load_voice_prompt",
+        "signature": "(voice_prompt: str)",
+        "kind": "method"
+      },
+      {
+        "name": "load_voice_prompt_embeddings",
+        "signature": "(path: str)",
+        "kind": "method"
+      },
+      {
+        "name": "register_load_state_dict_post_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "register_state_dict_pre_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "reset_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "save_streaming_state",
+        "signature": "(save_path: str, metadata_save_path: str, extra_state_dict:
+Optional[dict[str, torch.Tensor]] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "save_voice_prompt_embeddings",
+        "kind": "bool"
+      },
+      {
+        "name": "set_extra_state",
+        "signature": "(state: Any) -> None",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_propagate",
+        "signature": "(streaming_propagate: bool)",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state",
+        "signature": "(state: dict[str, typing.Any])",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state_inplace",
+        "signature": "(state: dict[str, typing.Union[torch.Tensor, int, float, str, bool,
+NoneType]])",
+        "kind": "method"
+      },
+      {
+        "name": "state_dict",
+        "signature": "(*args, destination=None, prefix='', keep_vars=False)",
+        "kind": "method"
+      },
+      {
+        "name": "step_system_prompts",
+        "signature": "(mimi)",
+        "kind": "method"
+      },
+      {
+        "name": "step_system_prompts_async",
+        "signature": "(mimi, is_alive: Optional[Callable] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming_forever",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "text_prompt_tokens",
+        "kind": "NoneType"
+      },
+      {
+        "name": "voice_prompt",
+        "kind": "NoneType"
+      },
+      {
+        "name": "voice_prompt_audio",
+        "kind": "NoneType"
+      },
+      {
+        "name": "voice_prompt_cache",
+        "kind": "NoneType"
+      },
+      {
+        "name": "voice_prompt_embeddings",
+        "kind": "NoneType"
+      }
+    ]
+  },
+  "mimi": {
+    "label": "mimi",
+    "type": "MimiModel",
+    "module": "moshi.models.compression",
+    "attrs": [
+      {
+        "name": "_apply_named_streaming",
+        "signature": "(fn: Any)",
+        "kind": "method"
+      },
+      {
+        "name": "_init_streaming_state",
+        "signature": "(batch_size: int) -> moshi.models.compression._MimiState",
+        "kind": "method"
+      },
+      {
+        "name": "_load_from_state_dict",
+        "signature": "(state_dict, prefix, local_metadata, strict, missing_keys,
+unexpected_keys, error_msgs)",
+        "kind": "method"
+      },
+      {
+        "name": "_load_state_dict_post_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_load_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_register_load_state_dict_pre_hook",
+        "signature": "(hook, with_module=False)",
+        "kind": "method"
+      },
+      {
+        "name": "_register_state_dict_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "_save_to_state_dict",
+        "signature": "(destination, prefix, keep_vars)",
+        "kind": "method"
+      },
+      {
+        "name": "_start_streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "_state_dict_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_stop_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "_streaming_propagate",
+        "kind": "bool"
+      },
+      {
+        "name": "_streaming_state",
+        "kind": "_MimiState"
+      },
+      {
+        "name": "get_extra_state",
+        "signature": "() -> Any",
+        "kind": "method"
+      },
+      {
+        "name": "get_streaming_state",
+        "signature": "() -> dict[str, typing.Any]",
+        "kind": "method"
+      },
+      {
+        "name": "is_streaming",
+        "kind": "bool"
+      },
+      {
+        "name": "load_state_dict",
+        "signature": "(state_dict: Mapping[str, Any], strict: bool = True, assign: bool =
+False)",
+        "kind": "method"
+      },
+      {
+        "name": "register_load_state_dict_post_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "register_state_dict_pre_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "reset_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "save_streaming_state",
+        "signature": "(save_path: str, metadata_save_path: str, extra_state_dict:
+Optional[dict[str, torch.Tensor]] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "set_extra_state",
+        "signature": "(state: Any) -> None",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_propagate",
+        "signature": "(streaming_propagate: bool)",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state",
+        "signature": "(state: dict[str, typing.Any])",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state_inplace",
+        "signature": "(state: dict[str, typing.Union[torch.Tensor, int, float, str, bool,
+NoneType]])",
+        "kind": "method"
+      },
+      {
+        "name": "state_dict",
+        "signature": "(*args, destination=None, prefix='', keep_vars=False)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming_forever",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      }
+    ]
+  },
+  "lm": {
+    "label": "lm",
+    "type": "LMModel",
+    "module": "moshi.models.lm",
+    "attrs": [
+      {
+        "name": "_apply_named_streaming",
+        "signature": "(fn: Any)",
+        "kind": "method"
+      },
+      {
+        "name": "_init_streaming_state",
+        "signature": "(batch_size: int) -> moshi.modules.streaming._NullState",
+        "kind": "method"
+      },
+      {
+        "name": "_load_from_state_dict",
+        "signature": "(state_dict, prefix, local_metadata, strict, missing_keys,
+unexpected_keys, error_msgs)",
+        "kind": "method"
+      },
+      {
+        "name": "_load_state_dict_post_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_load_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_register_load_state_dict_pre_hook",
+        "signature": "(hook, with_module=False)",
+        "kind": "method"
+      },
+      {
+        "name": "_register_state_dict_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "_save_to_state_dict",
+        "signature": "(destination, prefix, keep_vars)",
+        "kind": "method"
+      },
+      {
+        "name": "_start_streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "_state_dict_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_stop_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "_streaming_propagate",
+        "kind": "bool"
+      },
+      {
+        "name": "_streaming_state",
+        "kind": "_NullState"
+      },
+      {
+        "name": "get_extra_state",
+        "signature": "() -> Any",
+        "kind": "method"
+      },
+      {
+        "name": "get_streaming_state",
+        "signature": "() -> dict[str, typing.Any]",
+        "kind": "method"
+      },
+      {
+        "name": "is_streaming",
+        "kind": "bool"
+      },
+      {
+        "name": "load_state_dict",
+        "signature": "(state_dict: Mapping[str, Any], strict: bool = True, assign: bool =
+False)",
+        "kind": "method"
+      },
+      {
+        "name": "register_load_state_dict_post_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "register_state_dict_pre_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "reset_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "save_streaming_state",
+        "signature": "(save_path: str, metadata_save_path: str, extra_state_dict:
+Optional[dict[str, torch.Tensor]] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "set_extra_state",
+        "signature": "(state: Any) -> None",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_propagate",
+        "signature": "(streaming_propagate: bool)",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state",
+        "signature": "(state: dict[str, typing.Any])",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state_inplace",
+        "signature": "(state: dict[str, typing.Union[torch.Tensor, int, float, str, bool,
+NoneType]])",
+        "kind": "method"
+      },
+      {
+        "name": "state_dict",
+        "signature": "(*args, destination=None, prefix='', keep_vars=False)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming_forever",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      }
+    ]
+  },
+  "transformer": {
+    "label": "transformer",
+    "type": "StreamingTransformer",
+    "module": "moshi.modules.transformer",
+    "attrs": [
+      {
+        "name": "_apply_named_streaming",
+        "signature": "(fn: Any)",
+        "kind": "method"
+      },
+      {
+        "name": "_init_streaming_state",
+        "signature": "(batch_size: int) -> moshi.modules.transformer._TransformerState",
+        "kind": "method"
+      },
+      {
+        "name": "_load_from_state_dict",
+        "signature": "(state_dict, prefix, local_metadata, strict, missing_keys,
+unexpected_keys, error_msgs)",
+        "kind": "method"
+      },
+      {
+        "name": "_load_state_dict_post_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_load_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_register_load_state_dict_pre_hook",
+        "signature": "(hook, with_module=False)",
+        "kind": "method"
+      },
+      {
+        "name": "_register_state_dict_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "_save_to_state_dict",
+        "signature": "(destination, prefix, keep_vars)",
+        "kind": "method"
+      },
+      {
+        "name": "_start_streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "_state_dict_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_state_dict_pre_hooks",
+        "kind": "OrderedDict(len=0)"
+      },
+      {
+        "name": "_stop_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "_streaming_propagate",
+        "kind": "bool"
+      },
+      {
+        "name": "_streaming_state",
+        "kind": "_TransformerState"
+      },
+      {
+        "name": "get_extra_state",
+        "signature": "() -> Any",
+        "kind": "method"
+      },
+      {
+        "name": "get_streaming_state",
+        "signature": "() -> dict[str, typing.Any]",
+        "kind": "method"
+      },
+      {
+        "name": "is_streaming",
+        "kind": "bool"
+      },
+      {
+        "name": "load_state_dict",
+        "signature": "(state_dict: Mapping[str, Any], strict: bool = True, assign: bool =
+False)",
+        "kind": "method"
+      },
+      {
+        "name": "register_load_state_dict_post_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "register_state_dict_pre_hook",
+        "signature": "(hook)",
+        "kind": "method"
+      },
+      {
+        "name": "reset_streaming",
+        "signature": "()",
+        "kind": "method"
+      },
+      {
+        "name": "save_streaming_state",
+        "signature": "(save_path: str, metadata_save_path: str, extra_state_dict:
+Optional[dict[str, torch.Tensor]] = None)",
+        "kind": "method"
+      },
+      {
+        "name": "set_extra_state",
+        "signature": "(state: Any) -> None",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_propagate",
+        "signature": "(streaming_propagate: bool)",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state",
+        "signature": "(state: dict[str, typing.Any])",
+        "kind": "method"
+      },
+      {
+        "name": "set_streaming_state_inplace",
+        "signature": "(state: dict[str, typing.Union[torch.Tensor, int, float, str, bool,
+NoneType]])",
+        "kind": "method"
+      },
+      {
+        "name": "state_dict",
+        "signature": "(*args, destination=None, prefix='', keep_vars=False)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      },
+      {
+        "name": "streaming_forever",
+        "signature": "(batch_size: int)",
+        "kind": "method"
+      }
+    ]
+  }
+}
+Stopping app - local entrypoint completed.
+✓ App completed. View run at https://modal.com/apps/dreamonzouk/main/ap-zgTOQjzH1ryhHTP2khgZEt
+
+---
+
+[setup] priming Sarah persona + NATF1 voice...
+/app/personaplex/moshi/moshi/models/lm.py:979: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(path)
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+[setup]   primed in 25.1s
+[setup] snapshotting post-prime streaming state...
+[setup]   snapshot done (0.0s)
+[setup] PersonaPlex ready — total 55.5s
+2026-04-25 22:32:08,693 [personaplex.process_call] INFO call f56ceaa092ae695e: process_call started
+2026-04-25 22:32:08,868 [personaplex.process_call] INFO call f56ceaa092ae695e: control WS connected
+2026-04-25 22:32:08,868 [personaplex.process_call] INFO call f56ceaa092ae695e: SessionStart (voice=NATF1, prompt=3198 chars)
+2026-04-25 22:32:08,933 [personaplex.process_call] ERROR call f56ceaa092ae695e: process_call crashed: 'Expected to find a streaming state for .cache.'
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 481, in process_call
+    self.lm_gen.set_streaming_state_inplace(self._primed_lm_state)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 401, in set_streaming_state_inplace
+    self._apply_named_streaming(_set)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 312, in _apply_named_streaming
+    _handle_module("", self, recurse=False)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 303, in _handle_module
+    fn(prefix, module)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 400, in _set
+    _set_streaming_state_inplace(module._streaming_state, state, prefix=name, device=device)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 115, in _set_streaming_state_inplace
+    _restore_streaming_state_from_keys(streaming_state, state_dict, prefix, [field.name for field in fields(streaming_state)], device)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 151, in _restore_streaming_state_from_keys
+    _restore_streaming_state_pt(existing_value, full_key, state_dict)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 91, in _restore_streaming_state_pt
+    raise KeyError(f"Expected to find a streaming state for {name}.")
+KeyError: 'Expected to find a streaming state for .cache.'
+⠹ Running (1/1 containers active)... View app at None
+
+---
+
+[setup]   primed in 27.4s
+[setup] snapshotting post-prime streaming state...
+[setup]   snapshot done (0.0s)
+[setup] PersonaPlex ready — total 79.3s
+2026-04-25 22:36:16,978 [personaplex.process_call] INFO call ff36a832a3b7d541: process_call started
+2026-04-25 22:36:17,438 [personaplex.process_call] INFO call ff36a832a3b7d541: control WS connected
+2026-04-25 22:36:17,438 [personaplex.process_call] INFO call ff36a832a3b7d541: SessionStart (voice=NATF1, prompt=3198 chars)
+2026-04-25 22:36:17,587 [personaplex.process_call] ERROR call ff36a832a3b7d541: process_call crashed: 'Expected to find a streaming state for .cache.'
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 484, in process_call
+    self.lm_gen.set_streaming_state_inplace(self._primed_lm_state)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 401, in set_streaming_state_inplace
+    self._apply_named_streaming(_set)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 312, in _apply_named_streaming
+    _handle_module("", self, recurse=False)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 303, in _handle_module
+    fn(prefix, module)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 400, in _set
+    _set_streaming_state_inplace(module._streaming_state, state, prefix=name, device=device)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 115, in _set_streaming_state_inplace
+    _restore_streaming_state_from_keys(streaming_state, state_dict, prefix, [field.name for field in fields(streaming_state)], device)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 151, in _restore_streaming_state_from_keys
+    _restore_streaming_state_pt(existing_value, full_key, state_dict)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 91, in _restore_streaming_state_pt
+    raise KeyError(f"Expected to find a streaming state for {name}.")
+KeyError: 'Expected to find a streaming state for .cache.'
+⠙ Running (1/1 containers active)... View app at None
+
+---
+
+process_call.spawn(
+2026-04-25 22:42:39,403 [clio.telephony] INFO spawned Modal process_call for call_id=a7ddf5adb5afdac9 room=clio-a7ddf5adb5afdac9
+   POST /twilio/voice -> 200 OK  (duration: 584.8 ms, execution: 154.8 ms)
+2026-04-25 22:42:40,424 [clio.control] INFO call a7ddf5adb5afdac9: ready after 0.7s
+2026-04-25 22:42:49,989 [clio.telephony] INFO call status: CallSid=CAd2a6a38c6b46e2aebd26e493899d48d0 status=completed duration=10s
+   POST /twilio/status -> 204 No Content  (duration: 6.66 s, execution: 62.7 ms)
+⠸ Running (2/2 containers active)... View app at None
+
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+2026-04-25 22:42:40,148 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-25 22:42:40,407 [personaplex.process_call] INFO call a7ddf5adb5afdac9: joined LiveKit room
+2026-04-25 22:42:40,416 [personaplex.process_call] INFO call a7ddf5adb5afdac9: SessionReady (0.95s)
+⠙ Running (1/1 containers active)... View app at None
+
+still leaved, why?
+
+---
+
+setup] PersonaPlex ready — total 54.5s
+2026-04-25 22:42:39,469 [personaplex.process_call] INFO call a7ddf5adb5afdac9: process_call started
+2026-04-25 22:42:39,751 [personaplex.process_call] INFO call a7ddf5adb5afdac9: control WS connected
+2026-04-25 22:42:39,751 [personaplex.process_call] INFO call a7ddf5adb5afdac9: SessionStart (voice=NATF1, prompt=3198 chars)
+2026-04-25 22:42:39,758 [personaplex.process_call] INFO call a7ddf5adb5afdac9: persona restored from snapshot in 0.007s
+2026-04-25 22:42:39,853 [livekit] INFO livekit_ffi::server:153:livekit_ffi::server - initializing ffi server v0.12.52
+2026-04-25 22:42:39,853 [livekit] INFO livekit_ffi::cabi:50:livekit_ffi::cabi - initializing ffi server v0.12.52
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+2026-04-25 22:42:40,148 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-25 22:42:40,407 [personaplex.process_call] INFO call a7ddf5adb5afdac9: joined LiveKit room
+2026-04-25 22:42:40,416 [personaplex.process_call] INFO call a7ddf5adb5afdac9: SessionReady (0.95s)
+⠸ Running (1/1 containers active)... View app at None
+
+---
+
+No call appears at LiveKit Dashboard → Telephony → Calls
+
+rooms show here:
+[Image #13]
+
+---
+
+[Image #14]
+
+---
+
+[Image #15] what should i do now?
+
+---
+
+[Image #16]
+
+---
+
+anything i should change for twilio?
+
+---
+
+[setup]   snapshot done (0.0s)
+[setup] PersonaPlex ready — total 54.5s
+2026-04-25 22:42:39,469 [personaplex.process_call] INFO call a7ddf5adb5afdac9: process_call started
+2026-04-25 22:42:39,751 [personaplex.process_call] INFO call a7ddf5adb5afdac9: control WS connected
+2026-04-25 22:42:39,751 [personaplex.process_call] INFO call a7ddf5adb5afdac9: SessionStart (voice=NATF1, prompt=3198 chars)
+2026-04-25 22:42:39,758 [personaplex.process_call] INFO call a7ddf5adb5afdac9: persona restored from snapshot in 0.007s
+2026-04-25 22:42:39,853 [livekit] INFO livekit_ffi::server:153:livekit_ffi::server - initializing ffi server v0.12.52
+2026-04-25 22:42:39,853 [livekit] INFO livekit_ffi::cabi:50:livekit_ffi::cabi - initializing ffi server v0.12.52
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+2026-04-25 22:42:40,148 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-25 22:42:40,407 [personaplex.process_call] INFO call a7ddf5adb5afdac9: joined LiveKit room
+2026-04-25 22:42:40,416 [personaplex.process_call] INFO call a7ddf5adb5afdac9: SessionReady (0.95s)
+2026-04-25 23:01:24,693 [personaplex.process_call] INFO call c36632f1267378b3: process_call started
+2026-04-25 23:01:24,870 [personaplex.process_call] INFO call c36632f1267378b3: control WS connected
+2026-04-25 23:01:24,872 [personaplex.process_call] INFO call c36632f1267378b3: SessionStart (voice=NATF1, prompt=3196 chars)
+2026-04-25 23:01:24,879 [personaplex.process_call] INFO call c36632f1267378b3: persona restored from snapshot in 0.007s
+2026-04-25 23:01:24,886 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-25 23:01:25,210 [personaplex.process_call] INFO call c36632f1267378b3: joined LiveKit room
+2026-04-25 23:01:25,218 [personaplex.process_call] INFO call c36632f1267378b3: SessionReady (0.52s)
+2026-04-25 23:01:34,454 [personaplex.process_call] INFO call c36632f1267378b3: caller audio subscribed (id=sip_+4917684071300)
+2026-04-25 23:01:34,455 [personaplex.process_call] INFO call c36632f1267378b3: starting PersonaPlex inference loop
+2026-04-25 23:01:34,583 [personaplex.process_call] INFO call c36632f1267378b3: first PersonaPlex frame produced
+2026-04-25 23:01:43,249 [personaplex.process_call] INFO call c36632f1267378b3: caller turn boundary #1
+2026-04-25 23:01:50,609 [personaplex.process_call] INFO call c36632f1267378b3: caller turn boundary #2
+2026-04-25 23:01:56,929 [personaplex.process_call] INFO call c36632f1267378b3: caller turn boundary #3
+
+   POST /twilio/voice -> 200 OK  (duration: 480.7 ms, execution: 412.9 ms)
+2026-04-25 23:01:25,185 [clio.control] INFO call c36632f1267378b3: ready after 0.4s
+2026-04-25 23:01:44,894 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:01:44,923 [clio.control] INFO call c36632f1267378b3: extractor → 0 updates (The transcript provided contains only control characters (0x14 and 0x16) and speaker labels (SARAH), with no intelligibl)
+2026-04-25 23:01:53,035 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:01:53,036 [clio.control] INFO call c36632f1267378b3: extractor → 0 updates (The transcript contains only silence markers (<0x14> and <0x16>) with no actual caller speech or data. There are no slot)
+2026-04-25 23:01:59,442 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:01:59,444 [clio.control] INFO call c36632f1267378b3: extractor → 0 updates (The transcript provided contains only control characters (0x14 and 0x16) from Sarah's side with no actual dialogue or ca)
+2026-04-25 23:02:04,208 [clio.telephony] INFO call status: CallSid=CA689fc0871c029c2b47c0a3701347ccf1 status=completed duration=42s
+   POST /twilio/status -> 204 No Content  (duration: 4.88 s, execution: 293.4 ms)
+⠸ Running (2/2 containers active)... View app at None
+
+after the premeable, it actually connects to something, but i'm not sure waht happens, hear bunch noises
+
+---
+
+it works
+
+---
+
+can you websearch for similar cases?
+
+---
+
+and another thing, i notice the session didn't end after i hang up?
+
+---
+
+i ended the process_call directly in the PersonaPlexService, is that okay?
+
+---
+
+[setup] priming Sarah persona + NATF1 voice...
+/app/personaplex/moshi/moshi/models/lm.py:979: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(path)
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+[setup]   primed in 26.8s
+[setup] snapshotting post-prime streaming state...
+Traceback (most recent call last):
+Runner failed with exception: TypeError("cannot pickle 'CUDAGraph' object")
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_runtime/user_code_imports.py", line 63, in call_lifecycle_functions
+    res = func(*args)
+          ^^^^^^^^^^^
+  File "/root/modal_app.py", line 375, in setup
+    self._primed_lm_state = _clone_streaming_state(
+                            ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/modal_app.py", line 947, in _clone_streaming_state
+    return copy.deepcopy(state)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 136, in deepcopy
+    y = copier(x, memo)
+        ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 221, in _deepcopy_dict
+    y[deepcopy(key, memo)] = deepcopy(value, memo)
+                             ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 162, in deepcopy
+    y = _reconstruct(x, memo, *rv)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 259, in _reconstruct
+    state = deepcopy(state, memo)
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 136, in deepcopy
+    y = copier(x, memo)
+        ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 221, in _deepcopy_dict
+    y[deepcopy(key, memo)] = deepcopy(value, memo)
+                             ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 162, in deepcopy
+    y = _reconstruct(x, memo, *rv)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 259, in _reconstruct
+    state = deepcopy(state, memo)
+            ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 136, in deepcopy
+    y = copier(x, memo)
+        ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 221, in _deepcopy_dict
+    y[deepcopy(key, memo)] = deepcopy(value, memo)
+                             ^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/copy.py", line 151, in deepcopy
+    rv = reductor(4)
+         ^^^^^^^^^^^
+TypeError: cannot pickle 'CUDAGraph' object
+⠧ Running (1/2 contain
+
+---
+
+CONNECT /control/fbae6f527096c1e8 -> 101 Switching Protocols  (duration: 193.3 s, execution: 193.2 s)
+2026-04-25 23:28:33,630 [clio.telephony] INFO call status: CallSid=CAf6bf6683a8b5da9ce3921398d33f899b status=completed duration=198s
+   POST /twilio/status -> 204 No Content  (duration: 231.2 ms, execution: 37.6 ms)
+⠦ Running (1/1 containers active)... View app at None
+
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+2026-04-25 23:25:25,673 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-25 23:25:26,035 [personaplex.process_call] INFO call fbae6f527096c1e8: joined LiveKit room
+2026-04-25 23:25:26,073 [personaplex.process_call] INFO call fbae6f527096c1e8: SessionReady (6.16s)
+2026-04-25 23:25:29,464 [personaplex.process_call] INFO call fbae6f527096c1e8: caller audio subscribed (id=sip_+4917684071300)
+2026-04-25 23:25:29,465 [personaplex.process_call] INFO call fbae6f527096c1e8: starting PersonaPlex inference loop
+2026-04-25 23:25:29,616 [personaplex.process_call] INFO call fbae6f527096c1e8: first PersonaPlex frame produced
+2026-04-25 23:25:37,842 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #1
+2026-04-25 23:25:40,506 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #2
+2026-04-25 23:25:47,386 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #3
+2026-04-25 23:25:52,187 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #4
+2026-04-25 23:26:00,987 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #5
+2026-04-25 23:26:04,241 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #6
+2026-04-25 23:26:08,878 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #7
+2026-04-25 23:26:10,671 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #8
+2026-04-25 23:26:25,130 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #9
+2026-04-25 23:26:27,193 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #10
+2026-04-25 23:26:30,068 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #11
+2026-04-25 23:26:33,915 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #12
+2026-04-25 23:26:35,030 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #13
+2026-04-25 23:26:39,839 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #14
+2026-04-25 23:26:52,662 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #15
+2026-04-25 23:26:56,181 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #16
+2026-04-25 23:27:03,540 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #17
+2026-04-25 23:27:05,141 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #18
+2026-04-25 23:27:10,634 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #19
+2026-04-25 23:27:14,741 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #20
+2026-04-25 23:27:18,103 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #21
+2026-04-25 23:27:23,844 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #22
+2026-04-25 23:27:26,104 [personaplex.process_call] INFO call fbae6f527096c1e8: speak directive — 27 tokens (reason=compliance deadline (120s) hit for incident_type)
+2026-04-25 23:27:29,141 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #23
+2026-04-25 23:27:38,405 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #24
+2026-04-25 23:27:46,021 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #25
+2026-04-25 23:28:01,461 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #26
+2026-04-25 23:28:15,133 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #27
+2026-04-25 23:28:23,223 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #28
+2026-04-25 23:28:25,156 [personaplex.process_call] INFO call fbae6f527096c1e8: speak directive — 24 tokens (reason=compliance deadline (180s) hit for incident_datetime)
+2026-04-25 23:28:33,462 [personaplex.process_call] INFO call fbae6f527096c1e8: caller turn boundary #29
+2026-04-25 23:28:33,548 [personaplex.process_call] INFO call fbae6f527096c1e8: caller disconnected (identity=sip_+4917684071300)
+2026-04-25 23:28:33,549 [personaplex.process_call] INFO call fbae6f527096c1e8: ending loop (caller left)
+2026-04-25 23:28:33,549 [personaplex.process_call] INFO call fbae6f527096c1e8: inference loop ended after 2254 frames (193.6s)
+2026-04-25 23:28:33,585 [livekit] INFO livekit::room:1620:livekit::room - disconnected from room with reason: ClientInitiated
+⠼ Running (1/1 containers active)... View app at None
+
+i notice that the function call works perfectly!
+
+---
+
+is the scribe working for the backchannel ASR?
+
+---
+
+yes
+
+---
+
+i think we can wireup the transcrip in streaming in UI? is that possible?
+
+---
+
+yes plz
+
+---
+
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 534, in process_call
+    module.set_streaming_state_inplace(flat)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 401, in set_streaming_state_inplace
+    self._apply_named_streaming(_set)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 314, in _apply_named_streaming
+    _handle_module(name, child)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 310, in _handle_module
+    _handle_module(prefix + "." + name, child)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 310, in _handle_module
+    _handle_module(prefix + "." + name, child)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 310, in _handle_module
+    _handle_module(prefix + "." + name, child)
+  [Previous line repeated 1 more time]
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 303, in _handle_module
+    fn(prefix, module)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 400, in _set
+    _set_streaming_state_inplace(module._streaming_state, state, prefix=name, device=device)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 115, in _set_streaming_state_inplace
+    _restore_streaming_state_from_keys(streaming_state, state_dict, prefix, [field.name for field in fields(streaming_state)], device)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 151, in _restore_streaming_state_from_keys
+    _restore_streaming_state_pt(existing_value, full_key, state_dict)
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 88, in _restore_streaming_state_pt
+    value.copy_(state_dict[name].to(value.device))
+                ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'to'
+
+---
+
+the phone call is really smooth, but the transcript isn't
+
+---
+
+i dont know what you did, but i think the scribe is not working after the change
+
+---
+
+shows nothing after : modal app logs personaplex-clio | grep -iE "scribe|elevenlabs|stt" | tail -30
+
+---
+
+still nothing after:
+modal app logs personaplex-clio | tail -150
+
+---
+
+can you revert back to you last code change?
+
+---
+
+whatever, just let us focusing on fix the scribe and showing on UI
+
+---
+
+2026-04-26 00:19:44,820 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-26 00:19:45,127 [personaplex.process_call] INFO call aa9b414889fb5cef: joined LiveKit room
+2026-04-26 00:19:45,145 [personaplex.process_call] INFO call aa9b414889fb5cef: SessionReady (4.28s)
+2026-04-26 00:19:50,481 [personaplex.process_call] INFO call aa9b414889fb5cef: caller audio subscribed (id=sip_+4917684071300)
+2026-04-26 00:19:50,482 [personaplex.process_call] INFO call aa9b414889fb5cef: scribe init — key_set=True, env_keys=['ELEVENLABS_API_KEY']
+2026-04-26 00:19:53,474 [livekit.plugins.elevenlabs] WARNING both `use_realtime` and `model_id` parameters are provided. `use_realtime` will be ignored.
+2026-04-26 00:19:53,474 [personaplex.process_call] ERROR call aa9b414889fb5cef: failed to start Scribe (continuing without): Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. You may need to create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 642, in process_call
+    scribe_stream = scribe.stream()
+                    ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/plugins/elevenlabs/stt.py", line 307, in stream
+    http_session=self._ensure_session(),
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/plugins/elevenlabs/stt.py", line 174, in _ensure_session
+    self._session = http_context.http_session()
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/http_context.py", line 47, in http_session
+    raise RuntimeError(
+RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. You may need to create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.
+2026-04-26 00:19:53,477 [personaplex.process_call] INFO call aa9b414889fb5cef: starting PersonaPlex inference loop
+2026-04-26 00:19:53,620 [personaplex.process_call] INFO call aa9b414889fb5cef: first PersonaPlex frame produced
+2026-04-26 00:19:58,277 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #1
+
+---
+
+also see the CUDA out of memory:
+[setup] saving post-prime streaming state to /tmp...
+[setup]   snapshot saved (2.9s)
+[setup] PersonaPlex ready — total 80.4s
+2026-04-26 00:19:40,868 [personaplex.process_call] INFO call aa9b414889fb5cef: process_call started
+2026-04-26 00:19:41,305 [personaplex.process_call] INFO call aa9b414889fb5cef: control WS connected
+2026-04-26 00:19:41,305 [personaplex.process_call] INFO call aa9b414889fb5cef: SessionStart (voice=NATF1, prompt=3196 chars)
+2026-04-26 00:19:44,008 [personaplex.process_call] INFO call aa9b414889fb5cef: persona restored from snapshot in 2.703s
+2026-04-26 00:19:44,047 [livekit] INFO livekit_ffi::server:153:livekit_ffi::server - initializing ffi server v0.12.52
+2026-04-26 00:19:44,048 [livekit] INFO livekit_ffi::cabi:50:livekit_ffi::cabi - initializing ffi server v0.12.52
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+2026-04-26 00:19:44,820 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-26 00:19:45,127 [personaplex.process_call] INFO call aa9b414889fb5cef: joined LiveKit room
+2026-04-26 00:19:45,145 [personaplex.process_call] INFO call aa9b414889fb5cef: SessionReady (4.28s)
+2026-04-26 00:19:50,481 [personaplex.process_call] INFO call aa9b414889fb5cef: caller audio subscribed (id=sip_+4917684071300)
+2026-04-26 00:19:50,482 [personaplex.process_call] INFO call aa9b414889fb5cef: scribe init — key_set=True, env_keys=['ELEVENLABS_API_KEY']
+2026-04-26 00:19:53,474 [livekit.plugins.elevenlabs] WARNING both `use_realtime` and `model_id` parameters are provided. `use_realtime` will be ignored.
+2026-04-26 00:19:53,474 [personaplex.process_call] ERROR call aa9b414889fb5cef: failed to start Scribe (continuing without): Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. You may need to create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 642, in process_call
+    scribe_stream = scribe.stream()
+                    ^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/plugins/elevenlabs/stt.py", line 307, in stream
+    http_session=self._ensure_session(),
+                 ^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/plugins/elevenlabs/stt.py", line 174, in _ensure_session
+    self._session = http_context.http_session()
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/livekit/agents/utils/http_context.py", line 47, in http_session
+    raise RuntimeError(
+RuntimeError: Attempted to use an http session outside of a job context. This is probably because you are trying to use a plugin without using the agent worker api. You may need to create your own aiohttp.ClientSession, pass it into the plugin constructor as a kwarg, and manage its lifecycle.
+2026-04-26 00:19:53,477 [personaplex.process_call] INFO call aa9b414889fb5cef: starting PersonaPlex inference loop
+2026-04-26 00:19:53,620 [personaplex.process_call] INFO call aa9b414889fb5cef: first PersonaPlex frame produced
+2026-04-26 00:19:58,277 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #1
+2026-04-26 00:20:08,626 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #2
+2026-04-26 00:20:10,616 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #3
+2026-04-26 00:20:13,877 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #4
+2026-04-26 00:20:15,403 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #5
+2026-04-26 00:20:21,558 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #6
+2026-04-26 00:20:30,278 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #7
+2026-04-26 00:20:46,002 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #8
+2026-04-26 00:21:06,917 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #9
+2026-04-26 00:21:13,391 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #10
+2026-04-26 00:21:14,547 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #11
+2026-04-26 00:21:20,917 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #12
+2026-04-26 00:21:51,798 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #13
+2026-04-26 00:21:54,490 [personaplex.process_call] INFO call aa9b414889fb5cef: speak directive — 27 tokens (reason=compliance deadline (120s) hit for incident_type)
+2026-04-26 00:21:55,157 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #14
+2026-04-26 00:22:02,837 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #15
+2026-04-26 00:22:17,078 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #16
+2026-04-26 00:22:19,077 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #17
+2026-04-26 00:22:22,757 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #18
+2026-04-26 00:22:32,037 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #19
+2026-04-26 00:22:45,796 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #20
+2026-04-26 00:22:48,330 [personaplex.process_call] INFO call aa9b414889fb5cef: speak directive — 24 tokens (reason=compliance deadline (180s) hit for incident_datetime)
+2026-04-26 00:22:49,878 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #21
+2026-04-26 00:22:55,557 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #22
+2026-04-26 00:23:04,278 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #23
+2026-04-26 00:23:14,998 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #24
+2026-04-26 00:23:19,077 [personaplex.process_call] INFO call aa9b414889fb5cef: caller turn boundary #25
+2026-04-26 00:23:22,617 [personaplex.process_call] ERROR call aa9b414889fb5cef: process_call crashed: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 37.94 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 539.51 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 854, in process_call
+    agent_pcm_t = self.mimi.decode(tokens[:, 1:9])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/models/compression.py", line 417, in decode
+    out = self.decoder(emb)
+          ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/utils/compile.py", line 70, in _wrapped
+    return fun(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 415, in forward
+    y = self.model(z)
+        ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/container.py", line 219, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 114, in forward
+    u, v = self.shortcut(x), self.block(x)
+                             ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/container.py", line 219, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/conv.py", line 275, in forward
+    return self.conv(x)
+           ^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/conv.py", line 152, in forward
+    x = self.conv(x)
+        ^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 505, in forward
+    out = super().forward(input[..., :input_length])
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/conv.py", line 308, in forward
+    return self._conv_forward(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/conv.py", line 304, in _conv_forward
+    return F.conv1d(input, weight, bias, self.stride,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 37.94 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 539.51 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-04-26 00:23:22,664 [livekit] INFO livekit::room:1620:livekit::room - disconnected from room with reason: ClientInitiated
+
+---
+
+do you know what's the latency right now? and how long can the conversation theoratically go to?
+
+---
+
+but the sse transcript still not working?
+
+---
+
+it all shows good now, let me try again
+
+---
+
+state = torch.load(path)
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+[setup]   primed in 26.7s
+[setup] saving post-prime streaming state to /tmp...
+[setup]   snapshot saved (3.1s)
+[setup] PersonaPlex ready — total 57.0s
+2026-04-26 00:45:00,408 [personaplex.process_call] INFO call e1b83c0344a5a3c3: process_call started
+2026-04-26 00:45:00,824 [personaplex.process_call] INFO call e1b83c0344a5a3c3: control WS connected
+2026-04-26 00:45:00,825 [personaplex.process_call] INFO call e1b83c0344a5a3c3: SessionStart (voice=NATF1, prompt=3196 chars)
+2026-04-26 00:45:01,176 [personaplex.process_call] ERROR call e1b83c0344a5a3c3: process_call crashed: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 3.00 MiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 28.53 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 9.94 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 537, in process_call
+    flat = load_streaming_state(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 255, in load_streaming_state
+    state_dict = load_file(path, device=device)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/safetensors/torch.py", line 315, in load_file
+    result[k] = f.get_tensor(k)
+                ^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 48.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 3.00 MiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 28.53 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 9.94 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+
+---
+
+also i notice a bug, that the server keeps doing setup, cachine over and over again the premeable prompt
+
+---
+
+Runner failed with exception: UnboundLocalError("cannot access local variable 'os' where it is not associated with a value")
+UnboundLocalError: cannot access local variable 'os' where it is not associated with a value
+Traceback (most recent call last):
+Runner failed with exception: UnboundLocalError("cannot access local variable 'os' where it is not associated with a value")
+  File "/pkg/modal/_runtime/container_io_manager.py", line 906, in handle_user_exception
+    yield
+  File "/pkg/modal/_runtime/user_code_imports.py", line 63, in call_lifecycle_functions
+    res = func(*args)
+          ^^^^^^^^^^^
+  File "/root/modal_app.py", line 270, in setup
+    f"{os.environ.get('PYTORCH_CUDA_ALLOC_CONF', '<unset>')}",
+       ^^
+UnboundLocalError: cannot access local variable 'os' where it is not associated with a value
+⠦ Running (1/2 containers active)... View app at None
+
+---
+
+[setup] fetching voice prompts...
+[setup]   voices ready (0.2s) — 18 prompts: ['NATF0', 'NATF1', 'NATF2', 'NATF3', 'NATM0', 'NATM1']...
+[setup] priming Sarah persona + NATF1 voice...
+/app/personaplex/moshi/moshi/models/lm.py:979: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  state = torch.load(path)
+Done loading audio silence.
+Done loading text prompt.
+Done loading audio silence.
+[setup]   primed in 26.9s
+[setup] saving post-prime streaming state to /tmp...
+[setup]   snapshot saved (2.8s) — GPU 19.9GB used / 42.4GB
+[setup] PersonaPlex ready — total 66.2s
+2026-04-26 00:51:03,838 [personaplex.process_call] INFO call 6911ef86f062a8c7: process_call started
+2026-04-26 00:51:03,994 [personaplex.process_call] INFO call 6911ef86f062a8c7: control WS connected
+2026-04-26 00:51:03,994 [personaplex.process_call] INFO call 6911ef86f062a8c7: SessionStart (voice=NATF1, prompt=3196 chars)
+2026-04-26 00:51:05,463 [personaplex.process_call] INFO call 6911ef86f062a8c7: persona restored from snapshot in 1.468s
+2026-04-26 00:51:05,487 [livekit] INFO livekit_ffi::server:153:livekit_ffi::server - initializing ffi server v0.12.52
+2026-04-26 00:51:05,488 [livekit] INFO livekit_ffi::cabi:50:livekit_ffi::cabi - initializing ffi server v0.12.52
+Nvidia Encoder is supported.
+Nvidia Decoder is supported.
+2026-04-26 00:51:05,730 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-26 00:51:05,935 [personaplex.process_call] INFO call 6911ef86f062a8c7: joined LiveKit room
+2026-04-26 00:51:05,944 [personaplex.process_call] INFO call 6911ef86f062a8c7: SessionReady (2.10s)
+2026-04-26 00:51:13,500 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller audio subscribed (id=sip_+4917684071300)
+2026-04-26 00:51:13,501 [personaplex.process_call] INFO call 6911ef86f062a8c7: scribe init — key_set=True, env_keys=['ELEVENLABS_API_KEY']
+2026-04-26 00:51:15,469 [personaplex.process_call] INFO call 6911ef86f062a8c7: Scribe STT stream opened
+2026-04-26 00:51:15,469 [personaplex.process_call] INFO call 6911ef86f062a8c7: starting PersonaPlex inference loop
+2026-04-26 00:51:15,603 [personaplex.process_call] INFO call 6911ef86f062a8c7: first PersonaPlex frame produced
+2026-04-26 00:51:17,468 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #1
+2026-04-26 00:51:18,795 [personaplex.process_call] INFO call 6911ef86f062a8c7: scribe final: 'Mm-hmm.'
+2026-04-26 00:51:22,589 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #2
+2026-04-26 00:51:23,914 [personaplex.process_call] INFO call 6911ef86f062a8c7: scribe final: 'Hey, how you doing?'
+2026-04-26 00:51:28,509 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #3
+2026-04-26 00:51:29,614 [personaplex.process_call] INFO call 6911ef86f062a8c7: scribe final: 'Yeah.'
+2026-04-26 00:51:31,869 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #4
+2026-04-26 00:51:32,888 [personaplex.process_call] INFO call 6911ef86f062a8c7: scribe final: "I'm not sure."
+2026-04-26 00:51:41,069 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #5
+2026-04-26 00:51:44,110 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #6
+2026-04-26 00:51:45,440 [personaplex.process_call] INFO call 6911ef86f062a8c7: speak directive — 27 tokens (reason=wrap-up gate: caller appears done but critical slot(s) missing: ['reporter_role', 'incident_datetime', 'location.full_address', 'incident_type', 'description', 'any_injuries', 'driver_was_policyholder', 'own_vehicle_damage.drivable'])
+2026-04-26 00:51:48,349 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #7
+2026-04-26 00:51:49,595 [personaplex.process_call] INFO call 6911ef86f062a8c7: scribe final: 'I just had a car accident, and I want to file a, a, a insurance, uh, claim.'
+2026-04-26 00:51:51,309 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #8
+2026-04-26 00:51:55,469 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller turn boundary #9
+2026-04-26 00:51:56,717 [personaplex.process_call] INFO call 6911ef86f062a8c7: scribe final: 'Yeah.'
+2026-04-26 00:52:06,480 [personaplex.process_call] INFO call 6911ef86f062a8c7: caller disconnected (identity=sip_+4917684071300)
+2026-04-26 00:52:06,481 [personaplex.process_call] INFO call 6911ef86f062a8c7: ending loop (caller left)
+2026-04-26 00:52:06,485 [personaplex.process_call] INFO call 6911ef86f062a8c7: inference loop ended after 637 frames (62.6s)
+
+it works, but in the ui, still didn't work
+
+---
+
+curl -N https://dreamonzouk--clio-backend-fastapi-app.modal.run/events/active
+event: hello
+data: {}
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+---
+
+2026-04-26 00:53:50,836 [personaplex.process_call] INFO call 237ec83fec9211a4: Scribe STT stream opened
+2026-04-26 00:53:50,836 [personaplex.process_call] INFO call 237ec83fec9211a4: starting PersonaPlex inference loop
+2026-04-26 00:53:50,964 [personaplex.process_call] INFO call 237ec83fec9211a4: first PersonaPlex frame produced
+2026-04-26 00:53:54,989 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #1
+2026-04-26 00:54:02,669 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #2
+2026-04-26 00:54:12,669 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #3
+2026-04-26 00:54:13,757 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Hi. I just had a car accident and I want to file a, a insurance claim. Yeah. I'm"
+2026-04-26 00:54:22,429 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #4
+2026-04-26 00:54:23,936 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "That's all right. I'm sure. Okay. We'll make it. Yep. So my policy number is 270"
+2026-04-26 00:54:24,714 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 27 tokens (reason=wrap-up gate: caller appears done but critical slot(s) missing: ['reporter_role', 'incident_datetime', 'location.full_address', 'incident_type', 'description', 'any_injuries', 'driver_was_policyholder', 'own_vehicle_damage.drivable'])
+2026-04-26 00:54:31,149 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #5
+2026-04-26 00:54:32,337 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Uh, sorry. It's 27006."
+2026-04-26 00:54:34,557 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 22 tokens (reason=forced readback: policy_number unconfirmed after grace window)
+2026-04-26 00:54:42,189 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #6
+2026-04-26 00:54:46,429 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #7
+2026-04-26 00:54:49,629 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #8
+2026-04-26 00:54:51,779 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Yeah, yeah, exactly. Uh, I'm not sure. I, I don't think I have that. Yeah. I..."
+2026-04-26 00:54:56,109 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #9
+2026-04-26 00:54:57,277 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: 'Yep. Yep.'
+2026-04-26 00:55:05,949 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #10
+2026-04-26 00:55:07,116 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Um, it's a white trunk. I'm not sure which, which brand."
+2026-04-26 00:55:10,077 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "I'm not sure."
+2026-04-26 00:55:10,739 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 57 tokens (reason=forced readback: incident_datetime unconfirmed after grace window)
+2026-04-26 00:55:13,469 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #11
+2026-04-26 00:55:14,797 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: 'Uh, so my name is Yoon Kong.'
+2026-04-26 00:55:24,269 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #12
+2026-04-26 00:55:25,278 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Sorry, what'd you say?"
+2026-04-26 00:55:35,309 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #13
+2026-04-26 00:55:36,557 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: 'Yeah. Yeah.'
+2026-04-26 00:55:41,789 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #14
+2026-04-26 00:55:42,955 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "No, I don't think I have it."
+2026-04-26 00:55:44,718 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 27 tokens (reason=compliance deadline (120s) hit for incident_type)
+2026-04-26 00:55:51,389 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #15
+2026-04-26 00:55:52,635 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "No, I think it's good now."
+2026-04-26 00:55:56,979 [personaplex.process_call] INFO call 237ec83fec9211a4: caller disconnected (identity=sip_+4917684071300)
+2026-04-26 00:55:56,980 [personaplex.process_call] INFO call 237ec83fec9211a4: ending loop (caller left)
+2026-04-26 00:55:56,984 [personaplex.process_call] INFO call 237ec83fec9211a4: inference loop ended after 1576 frames (135.9s)
+2026-04-26 00:58:17,081 [personaplex.process_call] INFO call 1beff2908a9e97f8: process_call started
+2026-04-26 00:58:17,270 [personaplex.process_call] INFO call 1beff2908a9e97f8: control WS connected
+2026-04-26 00:58:17,270 [personaplex.process_call] INFO call 1beff2908a9e97f8: SessionStart (voice=NATF1, prompt=3196 chars)
+2026-04-26 00:58:19,195 [personaplex.process_call] INFO call 1beff2908a9e97f8: persona restored from snapshot in 1.925s
+2026-04-26 00:58:19,202 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-26 00:58:19,399 [personaplex.process_call] INFO call 1beff2908a9e97f8: joined LiveKit room
+2026-04-26 00:58:19,407 [personaplex.process_call] INFO call 1beff2908a9e97f8: SessionReady (2.32s)
+2026-04-26 00:58:26,834 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller audio subscribed (id=sip_+4917684071300)
+2026-04-26 00:58:26,835 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe init — key_set=True, env_keys=['ELEVENLABS_API_KEY']
+2026-04-26 00:58:26,835 [personaplex.process_call] INFO call 1beff2908a9e97f8: Scribe STT stream opened
+2026-04-26 00:58:26,835 [personaplex.process_call] INFO call 1beff2908a9e97f8: starting PersonaPlex inference loop
+2026-04-26 00:58:26,965 [personaplex.process_call] INFO call 1beff2908a9e97f8: first PersonaPlex frame produced
+2026-04-26 00:58:33,115 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Thank you.'
+2026-04-26 00:58:38,147 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #1
+2026-04-26 00:58:39,300 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'I want to file a insurance claim. I just had a car accident.'
+2026-04-26 00:58:56,910 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #2
+2026-04-26 00:58:58,589 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #3
+2026-04-26 00:58:59,435 [personaplex.process_call] INFO call 1beff2908a9e97f8: speak directive — 27 tokens (reason=wrap-up gate: caller appears done but critical slot(s) missing: ['reporter_role', 'incident_datetime', 'location.full_address', 'incident_type', 'description', 'any_injuries', 'driver_was_policyholder', 'own_vehicle_damage.drivable'])
+2026-04-26 00:58:59,757 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Well, I was at the traffic light and, uh, uh, the car, I think, next to me, uh, '
+2026-04-26 00:59:08,109 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #4
+2026-04-26 00:59:09,357 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "No, no, no. No one's harmed."
+2026-04-26 00:59:12,503 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "I'm sorry, ma'am?"
+2026-04-26 00:59:16,987 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Mm-hmm.'
+2026-04-26 00:59:24,109 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #5
+2026-04-26 00:59:25,949 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #6
+2026-04-26 00:59:26,482 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'And please do let me know. Please do not get in contact with me until I do so. Y'
+2026-04-26 00:59:29,437 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Just repeat it.'
+2026-04-26 00:59:34,509 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #7
+2026-04-26 00:59:35,597 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "Yeah. It's 100675."
+2026-04-26 00:59:38,421 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: '100675.'
+2026-04-26 00:59:42,509 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #8
+2026-04-26 00:59:43,547 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Yeah.'
+2026-04-26 00:59:46,716 [personaplex.process_call] INFO call 1beff2908a9e97f8: speak directive — 35 tokens (reason=forced readback: license_plate unconfirmed after grace window)
+2026-04-26 00:59:47,123 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Thank you.'
+2026-04-26 00:59:49,710 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #9
+2026-04-26 00:59:51,050 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "It's in the..."
+2026-04-26 00:59:54,750 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #10
+2026-04-26 00:59:55,602 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "Yeah, yeah, yeah. Yeah. You're right."
+2026-04-26 01:00:00,909 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #11
+2026-04-26 01:00:02,159 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "It's, um..."
+2026-04-26 01:00:04,989 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #12
+2026-04-26 01:00:06,077 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'In the center area of Berlin.'
+2026-04-26 01:00:07,860 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Thank you.'
+2026-04-26 01:00:14,749 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #13
+2026-04-26 01:00:20,189 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #14
+2026-04-26 01:00:21,519 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "Uh, I don't think I have it, but I think the other driver has it. Maybe I should"
+2026-04-26 01:00:25,103 [personaplex.process_call] ERROR call 1beff2908a9e97f8: process_call crashed: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 38.39 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 83.81 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 918, in process_call
+    agent_pcm_t = self.mimi.decode(tokens[:, 1:9])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/models/compression.py", line 417, in decode
+    out = self.decoder(emb)
+          ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/utils/compile.py", line 70, in _wrapped
+    return fun(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 415, in forward
+    y = self.model(z)
+        ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/container.py", line 219, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 115, in forward
+    return self.add(u, v)
+           ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 461, in forward
+    return x[..., :m_l] + y[..., :m_l]
+           ~~~~~~~~~~~~~^~~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 38.39 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 83.81 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-04-26 01:00:25,128 [livekit] INFO livekit::room:1620:livekit::room - disconnected from room with reason: ClientInitiated
+[setup] PYTORCH_CUDA_ALLOC_CONF=ex
+
+❯ modal deploy model_service/deploy/modal_backend.py
+✓ Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_back
+│   end.py
+├── 🔨 Created mount /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/data
+├── 🔨 Created mount PythonPackage:backend
+└── 🔨 Created web function fastapi_app =>
+    https://dreamonzouk--clio-backend-fastapi-app.modal.run
+✓ App deployed in 1.474s! 🎉
+
+View Deployment: https://modal.com/apps/dreamonzouk/main/deployed/clio-backend
+
+…/Clio main !?2s
+❯ curl -N https://dreamonzouk--clio-backend-fastapi-app.modal.run/events/active
+event: hello
+data: {}
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+---
+
+2026-04-26 00:53:50,836 [personaplex.process_call] INFO call 237ec83fec9211a4: Scribe STT stream opened
+2026-04-26 00:53:50,836 [personaplex.process_call] INFO call 237ec83fec9211a4: starting PersonaPlex inference loop
+2026-04-26 00:53:50,964 [personaplex.process_call] INFO call 237ec83fec9211a4: first PersonaPlex frame produced
+2026-04-26 00:53:54,989 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #1
+2026-04-26 00:54:02,669 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #2
+2026-04-26 00:54:12,669 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #3
+2026-04-26 00:54:13,757 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Hi. I just had a car accident and I want to file a, a insurance claim. Yeah. I'm"
+2026-04-26 00:54:22,429 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #4
+2026-04-26 00:54:23,936 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "That's all right. I'm sure. Okay. We'll make it. Yep. So my policy number is 270"
+2026-04-26 00:54:24,714 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 27 tokens (reason=wrap-up gate: caller appears done but critical slot(s) missing: ['reporter_role', 'incident_datetime', 'location.full_address', 'incident_type', 'description', 'any_injuries', 'driver_was_policyholder', 'own_vehicle_damage.drivable'])
+2026-04-26 00:54:31,149 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #5
+2026-04-26 00:54:32,337 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Uh, sorry. It's 27006."
+2026-04-26 00:54:34,557 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 22 tokens (reason=forced readback: policy_number unconfirmed after grace window)
+2026-04-26 00:54:42,189 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #6
+2026-04-26 00:54:46,429 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #7
+2026-04-26 00:54:49,629 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #8
+2026-04-26 00:54:51,779 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Yeah, yeah, exactly. Uh, I'm not sure. I, I don't think I have that. Yeah. I..."
+2026-04-26 00:54:56,109 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #9
+2026-04-26 00:54:57,277 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: 'Yep. Yep.'
+2026-04-26 00:55:05,949 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #10
+2026-04-26 00:55:07,116 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Um, it's a white trunk. I'm not sure which, which brand."
+2026-04-26 00:55:10,077 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "I'm not sure."
+2026-04-26 00:55:10,739 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 57 tokens (reason=forced readback: incident_datetime unconfirmed after grace window)
+2026-04-26 00:55:13,469 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #11
+2026-04-26 00:55:14,797 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: 'Uh, so my name is Yoon Kong.'
+2026-04-26 00:55:24,269 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #12
+2026-04-26 00:55:25,278 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "Sorry, what'd you say?"
+2026-04-26 00:55:35,309 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #13
+2026-04-26 00:55:36,557 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: 'Yeah. Yeah.'
+2026-04-26 00:55:41,789 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #14
+2026-04-26 00:55:42,955 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "No, I don't think I have it."
+2026-04-26 00:55:44,718 [personaplex.process_call] INFO call 237ec83fec9211a4: speak directive — 27 tokens (reason=compliance deadline (120s) hit for incident_type)
+2026-04-26 00:55:51,389 [personaplex.process_call] INFO call 237ec83fec9211a4: caller turn boundary #15
+2026-04-26 00:55:52,635 [personaplex.process_call] INFO call 237ec83fec9211a4: scribe final: "No, I think it's good now."
+2026-04-26 00:55:56,979 [personaplex.process_call] INFO call 237ec83fec9211a4: caller disconnected (identity=sip_+4917684071300)
+2026-04-26 00:55:56,980 [personaplex.process_call] INFO call 237ec83fec9211a4: ending loop (caller left)
+2026-04-26 00:55:56,984 [personaplex.process_call] INFO call 237ec83fec9211a4: inference loop ended after 1576 frames (135.9s)
+2026-04-26 00:58:17,081 [personaplex.process_call] INFO call 1beff2908a9e97f8: process_call started
+2026-04-26 00:58:17,270 [personaplex.process_call] INFO call 1beff2908a9e97f8: control WS connected
+2026-04-26 00:58:17,270 [personaplex.process_call] INFO call 1beff2908a9e97f8: SessionStart (voice=NATF1, prompt=3196 chars)
+2026-04-26 00:58:19,195 [personaplex.process_call] INFO call 1beff2908a9e97f8: persona restored from snapshot in 1.925s
+2026-04-26 00:58:19,202 [livekit] INFO livekit_api::signal_client::signal_stream:103:livekit_api::signal_client::signal_stream - connecting to wss://bigberlinhack2026-55fcyqmb.livekit.cloud/rtc?sdk=python&os=Debian&os_version=12.0.0&protocol=16&auto_subscribe=1&adaptive_stream=0&version=1.1.5
+2026-04-26 00:58:19,399 [personaplex.process_call] INFO call 1beff2908a9e97f8: joined LiveKit room
+2026-04-26 00:58:19,407 [personaplex.process_call] INFO call 1beff2908a9e97f8: SessionReady (2.32s)
+2026-04-26 00:58:26,834 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller audio subscribed (id=sip_+4917684071300)
+2026-04-26 00:58:26,835 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe init — key_set=True, env_keys=['ELEVENLABS_API_KEY']
+2026-04-26 00:58:26,835 [personaplex.process_call] INFO call 1beff2908a9e97f8: Scribe STT stream opened
+2026-04-26 00:58:26,835 [personaplex.process_call] INFO call 1beff2908a9e97f8: starting PersonaPlex inference loop
+2026-04-26 00:58:26,965 [personaplex.process_call] INFO call 1beff2908a9e97f8: first PersonaPlex frame produced
+2026-04-26 00:58:33,115 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Thank you.'
+2026-04-26 00:58:38,147 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #1
+2026-04-26 00:58:39,300 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'I want to file a insurance claim. I just had a car accident.'
+2026-04-26 00:58:56,910 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #2
+2026-04-26 00:58:58,589 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #3
+2026-04-26 00:58:59,435 [personaplex.process_call] INFO call 1beff2908a9e97f8: speak directive — 27 tokens (reason=wrap-up gate: caller appears done but critical slot(s) missing: ['reporter_role', 'incident_datetime', 'location.full_address', 'incident_type', 'description', 'any_injuries', 'driver_was_policyholder', 'own_vehicle_damage.drivable'])
+2026-04-26 00:58:59,757 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Well, I was at the traffic light and, uh, uh, the car, I think, next to me, uh, '
+2026-04-26 00:59:08,109 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #4
+2026-04-26 00:59:09,357 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "No, no, no. No one's harmed."
+2026-04-26 00:59:12,503 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "I'm sorry, ma'am?"
+2026-04-26 00:59:16,987 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Mm-hmm.'
+2026-04-26 00:59:24,109 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #5
+2026-04-26 00:59:25,949 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #6
+2026-04-26 00:59:26,482 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'And please do let me know. Please do not get in contact with me until I do so. Y'
+2026-04-26 00:59:29,437 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Just repeat it.'
+2026-04-26 00:59:34,509 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #7
+2026-04-26 00:59:35,597 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "Yeah. It's 100675."
+2026-04-26 00:59:38,421 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: '100675.'
+2026-04-26 00:59:42,509 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #8
+2026-04-26 00:59:43,547 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Yeah.'
+2026-04-26 00:59:46,716 [personaplex.process_call] INFO call 1beff2908a9e97f8: speak directive — 35 tokens (reason=forced readback: license_plate unconfirmed after grace window)
+2026-04-26 00:59:47,123 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Thank you.'
+2026-04-26 00:59:49,710 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #9
+2026-04-26 00:59:51,050 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "It's in the..."
+2026-04-26 00:59:54,750 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #10
+2026-04-26 00:59:55,602 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "Yeah, yeah, yeah. Yeah. You're right."
+2026-04-26 01:00:00,909 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #11
+2026-04-26 01:00:02,159 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "It's, um..."
+2026-04-26 01:00:04,989 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #12
+2026-04-26 01:00:06,077 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'In the center area of Berlin.'
+2026-04-26 01:00:07,860 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: 'Thank you.'
+2026-04-26 01:00:14,749 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #13
+2026-04-26 01:00:20,189 [personaplex.process_call] INFO call 1beff2908a9e97f8: caller turn boundary #14
+2026-04-26 01:00:21,519 [personaplex.process_call] INFO call 1beff2908a9e97f8: scribe final: "Uh, I don't think I have it, but I think the other driver has it. Maybe I should"
+2026-04-26 01:00:25,103 [personaplex.process_call] ERROR call 1beff2908a9e97f8: process_call crashed: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 38.39 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 83.81 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Traceback (most recent call last):
+  File "/root/modal_app.py", line 918, in process_call
+    agent_pcm_t = self.mimi.decode(tokens[:, 1:9])
+                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/models/compression.py", line 417, in decode
+    out = self.decoder(emb)
+          ^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/utils/compile.py", line 70, in _wrapped
+    return fun(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 415, in forward
+    y = self.model(z)
+        ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/container.py", line 219, in forward
+    input = module(input)
+            ^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/seanet.py", line 115, in forward
+    return self.add(u, v)
+           ^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/local/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/app/personaplex/moshi/moshi/modules/streaming.py", line 461, in forward
+    return x[..., :m_l] + y[..., :m_l]
+           ~~~~~~~~~~~~~^~~~~~~~~~~~~~
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 MiB. GPU 0 has a total capacity of 39.49 GiB of which 1024.00 KiB is free. Process 1 has 39.48 GiB memory in use. Of the allocated memory 38.39 GiB is allocated by PyTorch, with 23.02 MiB allocated in private pools (e.g., CUDA Graphs), and 83.81 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting REDACTED:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+2026-04-26 01:00:25,128 [livekit] INFO livekit::room:1620:livekit::room - disconnected from room with reason: ClientInitiated
+[setup] PYTORCH_CUDA_ALLOC_CONF=ex
+
+❯ modal deploy model_service/deploy/modal_backend.py
+✓ Created objects.
+├── 🔨 Created mount
+│   /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/model_service/deploy/modal_back
+│   end.py
+├── 🔨 Created mount /Users/yongkangzou/Desktop/Hackathons/BigBerlinHack2026/Clio/data
+├── 🔨 Created mount PythonPackage:backend
+└── 🔨 Created web function fastapi_app =>
+    https://dreamonzouk--clio-backend-fastapi-app.modal.run
+✓ App deployed in 1.474s! 🎉
+
+View Deployment: https://modal.com/apps/dreamonzouk/main/deployed/clio-backend
+
+…/Clio main !?2s
+❯ curl -N https://dreamonzouk--clio-backend-fastapi-app.modal.run/events/active
+event: hello
+data: {}
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+: keepalive
+
+2026-04-25 23:26:54,782 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript contains only Sarah's acknowledgment responses ("Okay", "got", "it") without any substantive caller infor)
+2026-04-25 23:26:58,224 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:26:58,227 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (Sarah is asking the caller for the date and time of the incident. The recent transcript shows only Sarah's question ("wh)
+2026-04-25 23:27:05,638 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:05,639 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (Sarah is asking the caller for the date and time of the incident. The recent transcript shows only Sarah's question ("th)
+2026-04-25 23:27:12,901 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:12,903 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The recent transcript shows only Sarah speaking ("SARAH: and EPAD time EPAD of the EPAD incident? EPAD Perfect."). This )
+2026-04-25 23:27:17,076 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:17,077 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shows only Sarah's side of the conversation asking about a policy number and whether there is one. There )
+2026-04-25 23:27:19,822 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:19,823 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown contains only Sarah's partial speech fragments ("can", "EPAD", "look", "that", etc.) with no cohere)
+2026-04-25 23:27:25,994 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:25,995 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown contains only Sarah's confirmatory monologue about retrieving a case number. There is no actual cal)
+2026-04-25 23:27:25,995 [clio.control] INFO call fbae6f527096c1e8: gate fires speak — compliance deadline (120s) hit for incident_type
+2026-04-25 23:27:31,162 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:31,163 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The most recent transcript shows only Sarah's voice agent asking a clarification question ("was it a collision with anot)
+2026-04-25 23:27:40,356 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:40,357 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shows only Sarah's question fragments ("was it a collision with another vehicle, or something else?"). Th)
+2026-04-25 23:27:47,887 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:47,888 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown appears to be fragmented or garbled output from Sarah's speech, containing only partial words like )
+2026-04-25 23:28:03,306 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:28:03,307 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript fragment provided contains only Sarah's speech ("EPAD", "good", "EPAD", "to", "know", "EPAD", "Al", "righ)
+2026-04-25 23:28:17,223 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:28:17,224 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript provided contains only Sarah's (the agent's) side of the conversation, with fragmented text ("EPAD", "We")
+2026-04-25 23:28:25,021 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:28:25,023 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown consists only of Sarah's closing remarks ("We will reach out to you shortly. You're welcome!"). Thi)
+2026-04-25 23:28:25,023 [clio.control] INFO call fbae6f527096c1e8: gate fires speak — compliance deadline (180s) hit for incident_datetime
+2026-04-25 23:28:33,577 [clio.control] INFO call fbae6f527096c1e8: session JSON saved to /root/data/sessions/fbae6f527096c1e8.json
+2026-04-25 23:28:33,578 [clio.control.server] INFO call fbae6f527096c1e8: WebSocket disconnected
+CONNECT /control/fbae6f527096c1e8 -> 101 Switching Protocols  (duration: 193.3 s, execution: 193.2 s)
+2026-04-25 23:28:33,630 [clio.telephony] INFO call status: CallSid=CAf6bf6683a8b5da9ce3921398d33f899b status=completed duration=198s
+   POST /twilio/status -> 204 No Content  (duration: 231.2 ms, execution: 37.6 ms)
+⠴ Running (1/1 containers active)... View app at None
+
+---
+
+2026-04-25 23:26:54,782 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript contains only Sarah's acknowledgment responses ("Okay", "got", "it") without any substantive caller infor)
+2026-04-25 23:26:58,224 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:26:58,227 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (Sarah is asking the caller for the date and time of the incident. The recent transcript shows only Sarah's question ("wh)
+2026-04-25 23:27:05,638 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:05,639 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (Sarah is asking the caller for the date and time of the incident. The recent transcript shows only Sarah's question ("th)
+2026-04-25 23:27:12,901 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:12,903 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The recent transcript shows only Sarah speaking ("SARAH: and EPAD time EPAD of the EPAD incident? EPAD Perfect."). This )
+2026-04-25 23:27:17,076 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:17,077 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shows only Sarah's side of the conversation asking about a policy number and whether there is one. There )
+2026-04-25 23:27:19,822 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:19,823 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown contains only Sarah's partial speech fragments ("can", "EPAD", "look", "that", etc.) with no cohere)
+2026-04-25 23:27:25,994 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:25,995 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown contains only Sarah's confirmatory monologue about retrieving a case number. There is no actual cal)
+2026-04-25 23:27:25,995 [clio.control] INFO call fbae6f527096c1e8: gate fires speak — compliance deadline (120s) hit for incident_type
+2026-04-25 23:27:31,162 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:31,163 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The most recent transcript shows only Sarah's voice agent asking a clarification question ("was it a collision with anot)
+2026-04-25 23:27:40,356 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:40,357 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shows only Sarah's question fragments ("was it a collision with another vehicle, or something else?"). Th)
+2026-04-25 23:27:47,887 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:27:47,888 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown appears to be fragmented or garbled output from Sarah's speech, containing only partial words like )
+2026-04-25 23:28:03,306 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:28:03,307 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript fragment provided contains only Sarah's speech ("EPAD", "good", "EPAD", "to", "know", "EPAD", "Al", "righ)
+2026-04-25 23:28:17,223 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:28:17,224 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript provided contains only Sarah's (the agent's) side of the conversation, with fragmented text ("EPAD", "We")
+2026-04-25 23:28:25,021 [httpx] INFO HTTP Request: POST https://api.anthropic.com/v1/messages "HTTP/1.1 200 OK"
+2026-04-25 23:28:25,023 [clio.control] INFO call fbae6f527096c1e8: extractor → 0 updates (The transcript shown consists only of Sarah's closing remarks ("We will reach out to you shortly. You're welcome!"). Thi)
+2026-04-25 23:28:25,023 [clio.control] INFO call fbae6f527096c1e8: gate fires speak — compliance deadline (180s) hit for incident_datetime
+2026-04-25 23:28:33,577 [clio.control] INFO call fbae6f527096c1e8: session JSON saved to /root/data/sessions/fbae6f527096c1e8.json
+2026-04-25 23:28:33,578 [clio.control.server] INFO call fbae6f527096c1e8: WebSocket disconnected
+CONNECT /control/fbae6f527096c1e8 -> 101 Switching Protocols  (duration: 193.3 s, execution: 193.2 s)
+2026-04-25 23:28:33,630 [clio.telephony] INFO call status: CallSid=CAf6bf6683a8b5da9ce3921398d33f899b status=completed duration=198s
+   POST /twilio/status -> 204 No Content  (duration: 231.2 ms, execution: 37.6 ms)
+⠴ Running (1/1 containers active)... View app at None
+
+---
+
+why we heard over the phone an application has occurs, and the same thing happen for the app, keeps doing the priming Sarah persona over and over again
+
+---
+
+why it says an application error has happened? before even saying "welcome to alliance.."
+
+---
+
+what did you change for the redeploy on backend?
+
+---
+
+but the curl https://dreamonzouk--clio-backend-fastapi-app.modal.run/health returns nothing
+
+---
+
+…/Clio main !?2s
+❯ curl https://dreamonzouk--clio-backend-fastapi-app.modal.run/health
+{"ok":true,"pending_calls":1,"active_calls":0}%
