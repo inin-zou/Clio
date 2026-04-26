@@ -1,0 +1,26 @@
+help me enable to be able to modify all the champs inside each claim draft in the Operations UI directly
+
+---
+
+make me able to modify all the champs inside each claim draft in the Operations UI directly[Image #2]
+
+---
+
+what should i copy paste in SQL editor?
+
+---
+
+ok done
+
+---
+
+perfect, it works
+
+can you also add a button on the right down corner of the class "glass" section, make it align with the right end of claim draft
+
+---
+
+perfect, it works
+
+can you also add a button on the right down corner of the class "glass" section, make it align with the right end of claim draft
+call the button "send follow-up"
