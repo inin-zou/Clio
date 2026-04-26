@@ -15,6 +15,17 @@ import {
   statusOf,
   type TranscriptBubble,
 } from "@/lib/derive";
+import {
+  AUDIO_SETTINGS,
+  COMPLIANCE_RULES,
+  CRITICAL_SLOTS,
+  GATE_SETTINGS,
+  IDENTIFIER_SLOTS,
+  PERSONA_PROMPT,
+  RESCUE_RESPONSES,
+  RESCUE_TRIGGERS,
+  WRAPUP_PHRASINGS,
+} from "@/lib/agent-config";
 
 const RECENT_CALL_LIMIT = 12;
 
@@ -219,6 +230,7 @@ export default function Page() {
           )}
         </header>
 
+        {tab === "ops" && (
         <div
           style={{
             display: "grid",
@@ -345,6 +357,9 @@ export default function Page() {
             </div>
           </aside>
         </div>
+        )}
+
+        {tab === "vault" && <ContextVault />}
       </main>
     </>
   );
@@ -691,6 +706,182 @@ function TranscriptBubbleView({
         </div>
         <div className="bubble-text">{b.text}</div>
       </div>
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────
+// Context Vault — Sarah's persona, slot checklist, gate rules.
+// Read-only mirror of backend constants. See lib/agent-config.ts.
+// ───────────────────────────────────────────────────────────────────
+
+function ContextVault() {
+  return (
+    <div className="vault">
+      {/* Persona prompt — the WHO */}
+      <VaultCard
+        title="Persona prompt"
+        subtitle="Loaded into PersonaPlex once at container start. Defines Sarah's identity, tone, and read-back protocol."
+      >
+        <pre className="vault-pre">{PERSONA_PROMPT}</pre>
+      </VaultCard>
+
+      {/* Two-column row: critical slots + identifier slots */}
+      <div className="vault-row">
+        <VaultCard
+          title="Critical FNOL slots"
+          subtitle="The 10 fields Sarah must collect before the call can close cleanly."
+        >
+          <div className="vault-list">
+            {CRITICAL_SLOTS.map((s) => (
+              <div key={s.path} className="vault-item">
+                <div className="vault-item-main">
+                  <code className="vault-code">{s.path}</code>
+                  <span className="vault-item-label">{s.label}</span>
+                </div>
+                <span className="vault-item-desc">{s.desc}</span>
+              </div>
+            ))}
+          </div>
+        </VaultCard>
+
+        <VaultCard
+          title="Anchor filter scope"
+          subtitle="Updates for these slots are dropped unless the value appears in caller speech. Protects the FNOL from Sarah's hallucinations."
+        >
+          <div className="vault-chips">
+            {IDENTIFIER_SLOTS.map((s) => (
+              <code key={s} className="vault-chip">
+                {s}
+              </code>
+            ))}
+          </div>
+        </VaultCard>
+      </div>
+
+      {/* Compliance — what Sarah asks when slots are missing */}
+      <VaultCard
+        title="Compliance triggers"
+        subtitle="If a slot is still empty after its deadline, the gate forces Sarah to ask. Hand-templated phrasings, not LLM-generated."
+      >
+        <div className="vault-rules">
+          {COMPLIANCE_RULES.map((r) => (
+            <div key={r.slot} className="vault-rule">
+              <div className="vault-rule-head">
+                <code className="vault-code">{r.slot}</code>
+                <span className="vault-rule-deadline">
+                  {r.deadlineSec}s deadline
+                </span>
+              </div>
+              <p className="vault-rule-text">"{r.phrasing}"</p>
+            </div>
+          ))}
+        </div>
+      </VaultCard>
+
+      {/* Wrap-up — what Sarah asks when the caller wants to leave */}
+      <VaultCard
+        title="Wrap-up prompts"
+        subtitle="If the caller signals close while critical slots are still empty, the gate iterates through these (max 2 attempts)."
+      >
+        <div className="vault-rules">
+          {WRAPUP_PHRASINGS.map((w) => (
+            <div key={w.slot} className="vault-rule">
+              <div className="vault-rule-head">
+                <code className="vault-code">{w.slot}</code>
+              </div>
+              <p className="vault-rule-text">"{w.phrasing}"</p>
+            </div>
+          ))}
+        </div>
+      </VaultCard>
+
+      {/* Rescue — what Sarah says when caller can't hear her */}
+      <VaultCard
+        title="Audio rescue"
+        subtitle="When the caller signals they can't hear Sarah, she acknowledges instead of plowing ahead."
+      >
+        <div className="vault-row">
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h4 className="vault-subhead">Trigger phrases</h4>
+            <ul className="vault-bullets">
+              {RESCUE_TRIGGERS.map((t) => (
+                <li key={t}>{t}</li>
+              ))}
+            </ul>
+          </div>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <h4 className="vault-subhead">Sarah's response (rotates)</h4>
+            <ul className="vault-bullets">
+              {RESCUE_RESPONSES.map((r) => (
+                <li key={r}>"{r}"</li>
+              ))}
+            </ul>
+          </div>
+        </div>
+      </VaultCard>
+
+      {/* Gate + audio knobs */}
+      <div className="vault-row">
+        <VaultCard
+          title="Gate timing"
+          subtitle="Cooldowns and limits that shape the cadence of Sarah's interventions."
+        >
+          <SettingsTable rows={GATE_SETTINGS} />
+        </VaultCard>
+
+        <VaultCard
+          title="VAD / audio thresholds"
+          subtitle="Voice-activity tunables baked into the per-frame inference loop."
+        >
+          <SettingsTable rows={AUDIO_SETTINGS} />
+        </VaultCard>
+      </div>
+
+      <p className="vault-footnote">
+        Read-only mirror. Edit{" "}
+        <code>backend/app/reasoner/persona.py</code>,{" "}
+        <code>gate.py</code>, or{" "}
+        <code>model_service/deploy/modal_app.py</code> and redeploy to change.
+      </p>
+    </div>
+  );
+}
+
+function VaultCard({
+  title,
+  subtitle,
+  children,
+}: {
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="glass vault-card">
+      <header className="vault-card-head">
+        <h3 className="vault-card-title">{title}</h3>
+        {subtitle && <p className="vault-card-subtitle">{subtitle}</p>}
+      </header>
+      <div>{children}</div>
+    </section>
+  );
+}
+
+function SettingsTable({
+  rows,
+}: {
+  rows: { name: string; value: string; desc: string }[];
+}) {
+  return (
+    <div className="vault-table">
+      {rows.map((r) => (
+        <div key={r.name} className="vault-table-row">
+          <span className="vault-table-name">{r.name}</span>
+          <code className="vault-table-value">{r.value}</code>
+          <span className="vault-table-desc">{r.desc}</span>
+        </div>
+      ))}
     </div>
   );
 }
