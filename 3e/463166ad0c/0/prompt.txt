@@ -1,0 +1,3 @@
+can we show the role prompt and all the setting about the agent Sarah in the "Context Vault" tab
+
+current localhost:3000 only shows operations tab. ideally we show all the settings, the checklist we give to agent visualised in a similar "glass" class div list make it feel adjustable for user
