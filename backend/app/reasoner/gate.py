@@ -59,7 +59,7 @@ DIRECTIVE_COOLDOWN_SEC = 5.0
 
 # How many seconds of silence from the caller (no new turns) implies they're
 # wrapping up. If any critical slot is still missing at that point, fire wrap-up.
-WRAPUP_SILENCE_SECONDS = 6.0
+WRAPUP_SILENCE_SECONDS = 25.0  # was 6.0 — too aggressive; real callers need time to think between turns
 
 # Wrap-up phrase patterns. Any of these uttered by the caller fires the gate
 # even before the silence threshold.
@@ -85,6 +85,56 @@ COMPLIANCE_DEADLINES_SEC: dict[str, float] = {
     "incident_type": 120.0,       # 2 minutes — drives all conditional flow
 }
 
+# Wrap-up iteration cap. Each time the caller signals close (or sustains
+# silence past WRAPUP_SILENCE_SECONDS) and critical slots are still empty,
+# the gate fires one wrap-up question targeting the next un-asked missing
+# slot. After this many attempts, the gate stops nagging — caller has
+# legitimate need to leave at some point.
+WRAPUP_MAX_ATTEMPTS = 2
+
+# Rescue trigger: caller indicates they can't hear Sarah ("hello hello?",
+# "what did you say", "you broke up"). Sarah responds with an apologetic
+# "couldn't hear you" prompt instead of plowing ahead. Cooldown so we
+# don't spam the caller if they keep saying "hello".
+RESCUE_COOLDOWN_SEC = 20.0
+RESCUE_MAX_PER_CALL = 3
+
+_RESCUE_TRIGGER_PHRASES = (
+    "didn't hear",
+    "did not hear",
+    "can't hear",
+    "cannot hear",
+    "what did you say",
+    "could you repeat",
+    "say that again",
+    "say again",
+    "are you there",
+    "you broke up",
+    "you're breaking up",
+)
+
+_RESCUE_RESPONSES = (
+    "Sorry, I'm having a bit of trouble hearing you — could you say that again?",
+    "Apologies, I didn't quite catch that — what was it?",
+    "Sorry, you're a little unclear on my end — could you repeat that?",
+)
+
+
+def _looks_like_rescue_signal(session: FNOLSession) -> bool:
+    """True if the most recent caller turn suggests they can't hear Sarah
+    or are confused. Triggers on repeated "hello" or explicit can't-hear
+    phrases — both are unambiguous human signals of audio trouble."""
+    last_caller_text = ""
+    for turn in reversed(session.transcript):
+        if turn.role == "caller":
+            last_caller_text = turn.text.lower()
+            break
+    if not last_caller_text:
+        return False
+    if last_caller_text.count("hello") >= 2:
+        return True
+    return any(p in last_caller_text for p in _RESCUE_TRIGGER_PHRASES)
+
 # Drift detection: if the last N turns from the caller don't introduce any
 # new entity matching CRITICAL_SLOTS, that's drift. Disabled for MVP1; see
 # DRIFT_ENABLED below.
@@ -101,7 +151,10 @@ class _GateMemory:
     # READBACK_REFIRE_AFTER_TURNS of caller turns since our last attempt.
     readback_attempts: dict[str, dict] = field(default_factory=dict)
     fired_compliance: set[str] = field(default_factory=set)
-    fired_wrapup: bool = False
+    wrapup_attempts: int = 0
+    wrapup_asked: set[str] = field(default_factory=set)
+    fired_rescue_count: int = 0
+    last_rescue_at: datetime | None = None
 
 
 # ─── Trigger detection helpers ───────────────────────────────────────────────
@@ -221,6 +274,33 @@ class InterventionGate:
             if since < DIRECTIVE_COOLDOWN_SEC:
                 return None
 
+        # ── 0. Audio rescue ──────────────────────────────────────────────
+        # Caller signaled they can't hear / are confused ("hello hello?",
+        # "what did you say"). Fire BEFORE readback because confirming a
+        # value the caller can't hear is pointless. Capped per call and
+        # cooldown'd so we don't spam if the caller keeps saying "hello".
+        if (
+            self.memory.fired_rescue_count < RESCUE_MAX_PER_CALL
+            and (
+                self.memory.last_rescue_at is None
+                or (now - self.memory.last_rescue_at).total_seconds()
+                > RESCUE_COOLDOWN_SEC
+            )
+            and _looks_like_rescue_signal(s)
+        ):
+            text = _RESCUE_RESPONSES[
+                self.memory.fired_rescue_count % len(_RESCUE_RESPONSES)
+            ]
+            self.memory.fired_rescue_count += 1
+            self.memory.last_rescue_at = now
+            return self._stamp(self.builder.speak(
+                text=text,
+                reason=(
+                    f"rescue (attempt {self.memory.fired_rescue_count}/"
+                    f"{RESCUE_MAX_PER_CALL}): caller indicates can't hear / confused"
+                ),
+            ), now)
+
         # ── 1. Pending read-back ─────────────────────────────────────────
         # Fires when an entity-verification slot is filled but unconfirmed.
         # Re-fires every READBACK_REFIRE_AFTER_TURNS caller turns until
@@ -271,9 +351,16 @@ class InterventionGate:
 
         # ── 3. Wrap-up gate ──────────────────────────────────────────────
         # Only fires after the caller has spoken at least once — otherwise an
-        # empty session looks like infinite silence.
+        # empty session looks like infinite silence. Iterates through missing
+        # critical slots up to WRAPUP_MAX_ATTEMPTS; each wrap-up signal from
+        # the caller picks the next un-asked missing slot. Without this, the
+        # gate would fire once for the first missing slot and let Sarah close
+        # the call with the remaining slots empty (the under-asking pattern).
         caller_has_spoken = any(t.role == "caller" for t in s.transcript)
-        if not self.memory.fired_wrapup and caller_has_spoken:
+        if (
+            self.memory.wrapup_attempts < WRAPUP_MAX_ATTEMPTS
+            and caller_has_spoken
+        ):
             silence = _seconds_since_last_caller_turn(s, now)
             wrapup_intent = (
                 _caller_signaled_wrapup(s)
@@ -281,15 +368,23 @@ class InterventionGate:
             )
             if wrapup_intent:
                 missing = _missing_critical_slots(s)
-                if missing:
-                    self.memory.fired_wrapup = True
+                # Pick a missing slot we haven't already asked about via wrap-up.
+                unasked = [p for p in missing if p not in self.memory.wrapup_asked]
+                if unasked:
+                    target = unasked[0]
+                    self.memory.wrapup_attempts += 1
+                    self.memory.wrapup_asked.add(target)
                     return self._stamp(self.builder.speak(
-                        text=_wrapup_phrasing(missing[0]),
+                        text=_wrapup_phrasing(target),
                         after_release="resume",
-                        reason=f"wrap-up gate: caller appears done but critical "
-                        f"slot(s) missing: {missing}",
+                        reason=(
+                            f"wrap-up gate (attempt "
+                            f"{self.memory.wrapup_attempts}/{WRAPUP_MAX_ATTEMPTS}): "
+                            f"missing {missing}, asking about {target}"
+                        ),
                     ), now)
-                # else: all critical slots filled, let Sarah close naturally
+                # else: every missing slot has already been asked once via
+                # wrap-up, OR all critical slots are filled. Let Sarah close.
 
         # ── 4. Drift (disabled for MVP1) ─────────────────────────────────
         if DRIFT_ENABLED:
@@ -326,36 +421,34 @@ def _compliance_phrasing(slot_path: str) -> str:
 
 _WRAPUP_PHRASES_TEMPLATE: dict[str, str] = {
     "reporter_role": (
-        "Before I let you go — just to confirm, are you the policyholder, or "
-        "are you reporting on someone else's behalf?"
+        "One quick thing — are you the policyholder, or are you reporting "
+        "on someone else's behalf?"
     ),
     "incident_datetime": (
-        "Before I let you go, I just need the date and roughly the time the "
-        "accident happened — could you give me that?"
+        "I still need the date and roughly the time the accident happened "
+        "— could you give me that?"
     ),
     "location.full_address": (
-        "Before I let you go — what was the address or street, where the "
-        "accident happened?"
+        "What was the address or street where the accident happened?"
     ),
     "incident_type": (
-        "Before I let you go, I want to make sure I categorize this correctly — "
-        "was it a collision with another vehicle, parking damage, wildlife, "
-        "or something else?"
+        "I want to make sure I categorize this correctly — was it a "
+        "collision with another vehicle, parking damage, wildlife, or "
+        "something else?"
     ),
     "description": (
-        "Before I let you go — could you give me one more sentence about what "
-        "happened, in your own words? Just so I have your version on file."
+        "Could you give me one more sentence about what happened, in your "
+        "own words? Just so I have your version on file."
     ),
     "any_injuries": (
-        "Before we wrap up — was anyone injured? I want to make sure I note that."
+        "Was anyone injured? I want to make sure I note that."
     ),
     "driver_was_policyholder": (
-        "One last thing before I let you go — were you driving, or was someone "
-        "else behind the wheel?"
+        "One more thing — were you driving, or was someone else behind "
+        "the wheel?"
     ),
     "own_vehicle_damage.drivable": (
-        "Quick one before you go — is the car drivable right now, or do we "
-        "need to arrange a tow?"
+        "Is the car drivable right now, or do we need to arrange a tow?"
     ),
 }
 
@@ -363,8 +456,8 @@ _WRAPUP_PHRASES_TEMPLATE: dict[str, str] = {
 def _wrapup_phrasing(slot_path: str) -> str:
     return _WRAPUP_PHRASES_TEMPLATE.get(
         slot_path,
-        f"Before I let you go, I just need to confirm one thing — "
-        f"could you tell me about the {slot_path.replace('_', ' ').replace('.', ' ')}?",
+        f"One more thing — could you tell me about the "
+        f"{slot_path.replace('_', ' ').replace('.', ' ')}?",
     )
 
 

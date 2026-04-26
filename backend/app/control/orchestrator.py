@@ -27,7 +27,7 @@ from typing import Any
 from pydantic import TypeAdapter, ValidationError
 
 from ..reasoner import gate, persona
-from ..reasoner.extractor import SlotExtractor
+from ..reasoner.extractor import SlotExtractor, filter_caller_anchored
 from ..reasoner.schema import (
     CRITICAL_SLOTS,
     ReadbackEvent,
@@ -130,6 +130,16 @@ class CallOrchestrator:
             voice_prompt_id=self.voice_prompt_id,
         )
         await self._send(msg)
+
+        # Forced opening greeting so the floor is never cold. Without this
+        # Sarah waits for VAD to detect caller-side audio before EPAD fires
+        # — fragile (depends on line noise / caller's "hi") and adds 1-2s
+        # of dead air at call connect. Drip queues immediately; Modal will
+        # play it as soon as the snapshot restore completes.
+        await self._send(self.gate.directives.speak(
+            text=persona.opening_greeting(now=now),
+            reason="opening greeting (call connect)",
+        ))
 
     async def close(self, reason: str = "") -> None:
         if self._closed:
@@ -379,8 +389,22 @@ class CallOrchestrator:
             logger.info("call %s: extractor → %d updates (%s)", self.call_id,
                         len(result.updates), result.reasoning[:120])
 
-            # 2. Apply with merge semantics
-            applied, rejected = session.apply_updates(result.updates)
+            # 2. Structural anchor filter: drop identifier-slot updates whose
+            # value isn't anchored to caller text. Catches the predict-the-
+            # answer pattern where Sarah free-samples a value (e.g. "On June
+            # 15.") and Haiku stores it despite Rule 10.
+            kept_updates, anchor_dropped = filter_caller_anchored(
+                result.updates, window
+            )
+            if anchor_dropped:
+                logger.warning(
+                    "call %s: anchor filter dropped %d hallucinated identifier(s): %s",
+                    self.call_id, len(anchor_dropped),
+                    [(u.slot_path, u.value) for u, _ in anchor_dropped],
+                )
+
+            # 3. Apply with merge semantics
+            applied, rejected = session.apply_updates(kept_updates)
             if rejected:
                 logger.info("call %s: %d updates rejected: %s", self.call_id,
                             len(rejected),

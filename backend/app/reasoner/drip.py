@@ -72,6 +72,14 @@ class SpeakDirective(_BaseDirective):
         "PersonaPlex sample freely (default); 'silent' = force PAD until next "
         "directive (used when we want Sarah to wait for the caller).",
     )
+    silent_frames_after: int = Field(
+        default=0, ge=0, le=125,
+        description="Bounded PAD window (frames @ 12.5Hz, max 10s) inserted "
+        "AFTER the drip ends and BEFORE returning to after_release behavior. "
+        "Use to give the caller a guaranteed response window before Sarah's "
+        "text head free-samples — prevents 'predict the answer' hallucinations "
+        "where the model continues a Q→A pattern by vocalizing the likely reply.",
+    )
     reason: str = Field(
         default="",
         description="Human-readable reason this was emitted (logged, not sent to model).",
@@ -169,12 +177,14 @@ class DirectiveBuilder:
         text: str,
         *,
         after_release: Literal["resume", "silent"] = "resume",
+        silent_frames_after: int = 0,
         reason: str = "",
     ) -> SpeakDirective:
         return SpeakDirective(
             seq=self._next_seq(),
             text=text,
             after_release=after_release,
+            silent_frames_after=silent_frames_after,
             reason=reason,
         )
 

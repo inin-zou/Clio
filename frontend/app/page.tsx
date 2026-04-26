@@ -9,9 +9,11 @@ import {
   elapsedLabel,
   fnolDraftFields,
   fnolPercent,
+  groupTranscriptBubbles,
   incidentTypeLabel,
   locationDetail,
   statusOf,
+  type TranscriptBubble,
 } from "@/lib/derive";
 
 const RECENT_CALL_LIMIT = 12;
@@ -130,11 +132,11 @@ export default function Page() {
     return m;
   }, [callsOldFirst]);
 
-  // Active calls = first three currently-live, fall back to most-recent.
+  // Active calls = currently-live only (ended_at IS NULL). When nothing is
+  // live, the panel shows its empty state — no borrowing from history, so
+  // the "Active" label and the LIVE/REVIEW badges always tell the truth.
   const activeCalls = useMemo(() => {
-    const live = calls.filter((c) => !c.ended_at);
-    if (live.length >= 1) return live.slice(0, 3);
-    return calls.slice(0, 3);
+    return calls.filter((c) => !c.ended_at).slice(0, 3);
   }, [calls]);
 
   const recentClaims = useMemo(() => {
@@ -186,19 +188,9 @@ export default function Page() {
         >
           <div style={{ maxWidth: 640 }}>
             <h1 className="display" style={{ fontSize: 60, marginBottom: 18 }}>
-              {activeCalls.length > 0 ? (
-                <>
-                  {`${activeCalls.length} caller${activeCalls.length > 1 ? "s" : ""},`}
-                  <br />
-                  one calm queue.
-                </>
-              ) : (
-                <>
-                  Inbound claims,
-                  <br />
-                  drafted as they speak.
-                </>
-              )}
+              Inbound claims,
+              <br />
+              drafted as they speak.
             </h1>
             <p
               style={{
@@ -559,10 +551,11 @@ function HeroCall({
             {incidentTypeLabel(call)} — {locationDetail(call)}
           </p>
         </div>
-        <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
-          <button className="btn btn-secondary" disabled>Whisper</button>
-          <button className="btn btn-primary" disabled>Take over →</button>
-        </div>
+        {status.kind === "live" && (
+          <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+            <button className="btn btn-primary" disabled>Take over →</button>
+          </div>
+        )}
       </div>
 
       <div
@@ -608,7 +601,10 @@ function HeroCall({
             <h3 className="section-title">Live transcript</h3>
             <span className="meta-label">{messages.length} turns</span>
           </div>
-          <div style={{ maxHeight: 360, overflow: "auto" }}>
+          <div
+            className="transcript-stream"
+            style={{ maxHeight: 360, overflow: "auto" }}
+          >
             {messages.length === 0 && (
               <div
                 style={{
@@ -621,8 +617,12 @@ function HeroCall({
                 Waiting for first turn…
               </div>
             )}
-            {messages.map((m) => (
-              <TranscriptLine key={m.id} m={m} startedAt={call.started_at} />
+            {groupTranscriptBubbles(messages).map((b) => (
+              <TranscriptBubbleView
+                key={b.id}
+                b={b}
+                startedAt={call.started_at}
+              />
             ))}
           </div>
         </div>
@@ -665,32 +665,31 @@ function HeroCall({
   );
 }
 
-function TranscriptLine({
-  m,
+function TranscriptBubbleView({
+  b,
   startedAt,
 }: {
-  m: Message;
+  b: TranscriptBubble;
   startedAt: string;
 }) {
   const offsetSec = Math.max(
     0,
-    Math.floor((Date.parse(m.timestamp) - Date.parse(startedAt)) / 1000),
+    Math.floor((Date.parse(b.firstTimestamp) - Date.parse(startedAt)) / 1000),
   );
   const mm = Math.floor(offsetSec / 60);
   const ss = String(offsetSec % 60).padStart(2, "0");
+  const isCaller = b.role === "caller";
   return (
-    <div className="transcript-line">
-      <div className="transcript-meta">
-        <span>{m.role === "agent" ? "Agent" : "Caller"}</span>
-        <span style={{ color: "var(--text-quaternary)" }}>
-          {`${mm}:${ss}`}
-        </span>
-        {m.source && <span>{m.source}</span>}
-      </div>
-      <div
-        className={`transcript-text ${m.role === "caller" ? "is-caller" : ""}`}
-      >
-        {m.text}
+    <div className={`bubble-row ${isCaller ? "is-caller" : "is-agent"}`}>
+      <div className={`bubble ${isCaller ? "is-caller" : "is-agent"}`}>
+        <div className="bubble-meta">
+          <span>{isCaller ? "Caller" : "Agent"}</span>
+          <span style={{ color: "var(--text-quaternary)" }}>
+            {`${mm}:${ss}`}
+          </span>
+          {b.source && <span>{b.source}</span>}
+        </div>
+        <div className="bubble-text">{b.text}</div>
       </div>
     </div>
   );

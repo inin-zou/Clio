@@ -7,7 +7,7 @@
  * from the calls.fnol jsonb + calls.started_at/ended_at we already have.
  */
 
-import type { Call } from "@/lib/types";
+import type { Call, Message } from "@/lib/types";
 
 // ─── Critical slot paths ─────────────────────────────────────────────
 // Mirrors backend/app/reasoner/schema.py:CRITICAL_SLOTS. Keep in sync.
@@ -162,4 +162,84 @@ export function fnolDraftFields(c: Call): FnolField[] {
     { label: "Injuries",         value: get("any_injuries"),             required: true },
     { label: "Police report",    value: get("police_case_number"),       required: false },
   ];
+}
+
+// ─── Transcript bubble grouping ──────────────────────────────────────
+// Streaming transcripts arrive as fragments — "Got" / "it." / "When did" —
+// because the agent_text_buf flushes on phrase boundaries. We want each
+// "turn" to be ONE bubble: a continuous run of speech from one role,
+// grouped together regardless of brief interruptions from the other.
+//
+// Critical case: Sarah is mid-utterance ("Of course, happy to help...")
+// when the caller briefly interjects. The audio mute kicks in, "Of" gets
+// flushed, the caller's "Hi" arrives, then Sarah resumes with "course,
+// happy to help...". Without cross-role lookback, this becomes 3 bubbles
+// instead of the natural 2 (one Sarah utterance + one caller interjection).
+//
+// Rule: for each new message, look back to the last SAME-ROLE bubble,
+// skipping intervening other-role bubbles. If the gap to that bubble's
+// last fragment is below SAME_TURN_GAP_MS, merge in. Otherwise, new
+// bubble. We deliberately do NOT split on terminal punctuation — agent
+// replies naturally contain multiple sentences and the user perceives
+// them as one turn.
+//
+// Visual ordering: bubbles render in CREATION order (by their first
+// fragment's timestamp). When a later agent fragment merges into an
+// earlier agent bubble, that bubble extends in time but stays in its
+// original visual position. This means a continuous Sarah utterance
+// appears as ONE bubble even if the caller spoke during the middle.
+
+export type TranscriptBubble = {
+  id: number;            // first message id (stable React key)
+  role: "agent" | "caller";
+  source: string | null;
+  text: string;          // joined fragments
+  firstTimestamp: string;
+  lastTimestamp: string;
+};
+
+// Threshold for "is this part of the same turn?" — generous enough that
+// brief caller interjections (1-3s) don't break a continuous Sarah
+// utterance, but tight enough that a real back-and-forth (Sarah, caller
+// for 5s+, Sarah responding) creates two separate Sarah bubbles.
+const SAME_TURN_GAP_MS = 4000;
+
+export function groupTranscriptBubbles(messages: Message[]): TranscriptBubble[] {
+  const bubbles: TranscriptBubble[] = [];
+  for (const m of messages) {
+    const text = m.text.trim();
+    if (!text) continue;
+
+    // Find the most recent same-role bubble (may not be the very last).
+    let mergeTarget: TranscriptBubble | null = null;
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      if (bubbles[i].role === m.role) {
+        mergeTarget = bubbles[i];
+        break;
+      }
+    }
+    const gapMs = mergeTarget
+      ? Date.parse(m.timestamp) - Date.parse(mergeTarget.lastTimestamp)
+      : Infinity;
+
+    if (mergeTarget && gapMs < SAME_TURN_GAP_MS) {
+      // Continuation of an in-flight turn — join with a space, but don't
+      // double-space if the new fragment starts with punctuation.
+      const sep = /^[,.!?;:。！？，；：]/.test(text) ? "" : " ";
+      mergeTarget.text = (mergeTarget.text + sep + text)
+        .replace(/\s+/g, " ")
+        .trim();
+      mergeTarget.lastTimestamp = m.timestamp;
+    } else {
+      bubbles.push({
+        id: m.id,
+        role: m.role,
+        source: m.source ?? null,
+        text,
+        firstTimestamp: m.timestamp,
+        lastTimestamp: m.timestamp,
+      });
+    }
+  }
+  return bubbles;
 }

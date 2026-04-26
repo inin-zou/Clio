@@ -68,7 +68,9 @@ def orch(fake_ws, tmp_path: Path):
 @pytest.mark.asyncio
 async def test_session_start_sends_persona_prompt(orch, fake_ws):
     await orch.send_session_start()
-    assert len(fake_ws.sent) == 1
+    # Two messages now: session_start + forced opening greeting (so the
+    # floor is never cold while we wait for VAD to fire EPAD).
+    assert len(fake_ws.sent) == 2
     msg = fake_ws.sent[0]
     assert msg["type"] == "session_start"
     assert msg["call_id"] == "test-001"
@@ -77,6 +79,12 @@ async def test_session_start_sends_persona_prompt(orch, fake_ws):
     # System prompt should include both the BASE_PERSONA and time block
     assert "Allianz" in msg["system_prompt"]
     assert "CURRENT SESSION CONTEXT" in msg["system_prompt"]
+    # Second message is the forced opening greeting drip.
+    greeting = fake_ws.sent[1]
+    assert greeting["type"] == "speak"
+    assert "Allianz" in greeting["text"]
+    assert "Sarah" in greeting["text"]
+    assert "opening greeting" in greeting["reason"]
 
 
 @pytest.mark.asyncio
@@ -137,15 +145,23 @@ async def test_turn_boundary_runs_extractor_and_sends_directive(
     monkeypatch.setattr(extractor.SlotExtractor, "extract", fake_extract)
 
     # Add some caller turns first so the gate's grace-period logic doesn't
-    # reject the readback for being too early.
+    # reject the readback for being too early. The last caller turn must
+    # contain the extracted value so the structural anchor filter
+    # (filter_caller_anchored) keeps the identifier-slot update.
     started = orch.reasoner_session.session.started_at
     from datetime import timedelta
-    for i in range(4):
+    caller_lines = [
+        "hello, I want to file a claim",
+        "yes that's right",
+        "no nothing else for now",
+        "my plate is B-AL-1234",
+    ]
+    for i, line in enumerate(caller_lines):
         await orch.handle_message(
             TranscriptTurn(
                 call_id="test-001",
                 role="caller",
-                text=f"line {i}",
+                text=line,
                 timestamp=started + timedelta(seconds=i * 5),
             )
         )

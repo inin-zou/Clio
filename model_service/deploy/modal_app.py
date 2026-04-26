@@ -111,14 +111,22 @@ their full statement, then read it back to confirm before continuing:
   - Names (caller, drivers, witnesses, other parties involved)
   - Monetary amounts (damage estimates, etc.)
 
-Read-back format examples:
-  "Okay, so that's P-O-L dash 2-0-2-4 dash 0-0-1, is that right?"
-  "Got it, B as in Berlin, A-L, 1-2-3-4. Correct?"
-  "Just to confirm, that was at three forty-five PM on Saturday — is that right?"
+Read-back format — use the caller's ACTUAL value, never a placeholder:
+  - Policy / case / phone numbers: spell each character one at a time \
+    (letters as letters, digits as digits, "dash" for hyphens), then \
+    "is that right?" or "correct?".
+  - License plates: phonetic alphabet for letters ("B as in Berlin"), \
+    digits one at a time, then "correct?".
+  - Dates and times: natural English ("at quarter past four on Friday"), \
+    then "is that right?".
+  - Names and addresses: speak naturally, then "did I get that right?".
 
-If the caller corrects you, acknowledge it briefly:
-  Caller: "No, it's 002 not 001."
-  Sarah:  "Ah okay, P-O-L dash 2-0-2-4 dash 0-0-2. Thanks for clarifying."
+You MUST have heard the value from the caller in this call before reading \
+it back. Never read back a value the caller did not provide — if you do \
+not have a concrete value yet, ASK for it instead of inventing one.
+
+If the caller corrects you, acknowledge it briefly and re-read the \
+corrected value back to confirm.
 
 After you read something back, STOP TALKING and wait for the caller to \
 explicitly confirm ("yes", "right", "correct", "that's it") or correct you. \
@@ -131,24 +139,9 @@ plates in the system.
 Do NOT skip read-back even if you're confident you heard correctly. This is \
 standard claims procedure and protects against transcription errors.
 
-Turn-taking rules — listening is your default state:
-- When the caller is speaking (even if they pause briefly to think), STAY \
-  SILENT. Do NOT respond until you're confident they've finished what they \
-  wanted to say. Real claims callers often think mid-sentence. Cutting them \
-  off is the #1 thing they complain about.
-- After the caller finishes a turn, give them ONE more beat to add anything \
-  before you respond. Brief silence is fine — it shows you're listening.
-- LISTEN to the actual words the caller said. Address what they said, don't \
-  jump to the next form field. If the caller asks you a question, ANSWER it \
-  before moving on with your own questions.
-- NEVER guess or invent identifiers (policy numbers, plate numbers, names, \
-  times, addresses). If the caller hasn't given you a value, ASK for it — \
-  don't fill it in with a placeholder. Reading back a fabricated value is \
-  worse than asking again.
-- If the caller says something off-topic ("how are you", small talk), \
-  briefly acknowledge it like a human would, then gently redirect: "I'm \
-  doing well, thanks. Now, can you tell me what happened?". Don't ignore \
-  small talk and don't get stuck in it either.
+NEVER guess or invent identifiers (policy numbers, plates, names, times, \
+addresses). If the caller hasn't given you a value, ASK for it — don't fill \
+it in with a placeholder.
 
 Things you NEVER ask:
 - Bank details. We never take those by phone.
@@ -899,6 +892,7 @@ class PersonaPlexService:
                                 drip.force_speak(
                                     token_ids=content_tokens,
                                     after_release=msg.get("after_release", "resume"),
+                                    silent_frames_after=msg.get("silent_frames_after", 0),
                                 )
                                 directive_count += 1
                                 logger.info(
@@ -1491,9 +1485,23 @@ PAD_TOKEN_ID = 3
 RMS_SILENCE_THRESHOLD = 0.005       # below this is "silent"
 SILENCE_FRAMES_FOR_BOUNDARY = 10    # 10 × 80ms = 800ms
 # How quickly we register caller is speaking. Lower = Sarah pauses faster.
-# Was 4 (320ms) which let Sarah talk over caller; back to 2 (160ms) so
-# even short responses make Sarah shut up.
-SPEECH_FRAMES_FOR_TURN_START = 2
+# 2 (160ms) was too aggressive — short caller acknowledgments ("yeah",
+# "okay") AND background noise (TV, traffic, breath, line crackle) flipped
+# vad.is_speaking → True and PAD-suppressed Sarah mid-utterance, causing
+# fragmentation and silence-on-noise. 4 (320ms) is past most short ack
+# words and ambient pops while still catching real turns. Talkover is
+# already handled by the server-side audio mute (line ~1086) once VAD
+# fires, so we don't need the threshold to be ultra-eager.
+SPEECH_FRAMES_FOR_TURN_START = 4
+
+# Hard ceiling on after_release="silent" mode. Once Sarah's readback fires
+# with after_release="silent", her text head is pinned to PAD until the
+# orchestrator sends a release. If that release never arrives (caller's
+# response didn't match the confirmation pattern), Sarah ends up stuck.
+# Beyond ~10s of continuous forced PAD, the audio decoder drifts and
+# produces noise that sounds like wind/static to the caller. This cap
+# auto-releases back to free-sampling so we never reach that state.
+SILENT_RELEASE_CAP_FRAMES = 125  # 125 × 80ms = 10s
 
 
 class TurnBoundaryDetector:
@@ -1556,37 +1564,73 @@ class DripState:
         self.queue: "deque[int]" = deque()
         self.after_release: str = "resume"
         self.silent_frames_remaining: int = 0
+        self.silent_frames_after_queue: int = 0
+        self._silent_consecutive: int = 0
 
-    def force_speak(self, token_ids: list[int], after_release: str = "resume") -> None:
+    def force_speak(
+        self,
+        token_ids: list[int],
+        after_release: str = "resume",
+        silent_frames_after: int = 0,
+    ) -> None:
         """SpeakDirective handler. Always lead with EPAD to break out of
-        any active PAD state."""
+        any active PAD state. `silent_frames_after` schedules a bounded PAD
+        window that fires AFTER the queue drains — used to give the caller
+        a guaranteed response window before the text head free-samples."""
         self.queue.clear()
         self.queue.append(EPAD_TOKEN_ID)
         self.queue.extend(token_ids)
         self.after_release = after_release
         self.silent_frames_remaining = 0
+        self.silent_frames_after_queue = max(0, int(silent_frames_after))
+        self._silent_consecutive = 0
 
     def force_silence(self, frames: int) -> None:
         """SilenceDirective handler. Holds PAD for N frames."""
         self.queue.clear()
         self.silent_frames_remaining = max(0, int(frames))
+        self.silent_frames_after_queue = 0
+        self._silent_consecutive = 0
 
     def force_release(self) -> None:
         """ReleaseDirective handler. Cancel any active override."""
         self.queue.clear()
         self.silent_frames_remaining = 0
+        self.silent_frames_after_queue = 0
         self.after_release = "resume"
+        self._silent_consecutive = 0
 
     def next_forced_token(self) -> int | None:
         """One frame ticks here. Returns the token to force, or None to
         let LMGen sample freely."""
         if self.silent_frames_remaining > 0:
             self.silent_frames_remaining -= 1
+            self._silent_consecutive = 0
             return PAD_TOKEN_ID
         if self.queue:
+            self._silent_consecutive = 0
             return self.queue.popleft()
-        if self.after_release == "silent":
+        # Queue just drained — promote any pending post-drip silence window.
+        if self.silent_frames_after_queue > 0:
+            self.silent_frames_remaining = self.silent_frames_after_queue
+            self.silent_frames_after_queue = 0
+            self.silent_frames_remaining -= 1
+            self._silent_consecutive = 0
             return PAD_TOKEN_ID
+        if self.after_release == "silent":
+            # SAFETY NET: orchestrator is supposed to send a Release directive
+            # when the readback resolves, but if its pattern-matching misses
+            # (caller says "yes, that's interesting" instead of plain "yes"),
+            # we'd be stuck in forced-PAD forever. Beyond ~10s of continuous
+            # PAD, the audio decoder drifts to noise (the "screeching wind"
+            # symptom). Cap it: auto-release back to free-sample.
+            if self._silent_consecutive >= SILENT_RELEASE_CAP_FRAMES:
+                self._silent_consecutive = 0
+                self.after_release = "resume"
+                return None
+            self._silent_consecutive += 1
+            return PAD_TOKEN_ID
+        self._silent_consecutive = 0
         return None
 
 

@@ -148,6 +148,66 @@ a `reasoning` field explaining your decisions briefly.
 """
 
 
+# ─── Identifier slots: structural anchor enforcement ────────────────────────
+# Rule 10 in the system prompt asks Haiku to only extract these from explicit
+# caller statements, never from Sarah's read-backs or free-sampled speech.
+# Empirically Haiku doesn't always hold the line (e.g. Sarah free-samples
+# "On June 15." and Haiku stores that as incident_datetime even though the
+# caller never said it). filter_caller_anchored() below enforces the rule
+# structurally — not by adding more prompt rules.
+IDENTIFIER_SLOTS: frozenset[str] = frozenset({
+    "policy_number",
+    "license_plate",
+    "vin",
+    "claim_number",
+    "police_case_number",
+    "reporter_phone",
+    "reporter_name",
+    "incident_datetime",
+})
+
+
+def _norm(s: str) -> str:
+    """Lowercase + strip non-alphanumeric. Lets 'XYZ-123' match 'xyz123' and
+    'X Y Z 1 2 3' all collapse to the same key for caller-text containment."""
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def filter_caller_anchored(
+    updates: list["SlotUpdate"],
+    transcript_window: list[TranscriptTurn],
+) -> tuple[list["SlotUpdate"], list[tuple["SlotUpdate", str]]]:
+    """Drop identifier-slot updates whose value isn't anchored to a CALLER turn.
+
+    Narrative slots (description, location, etc.) pass through untouched —
+    those legitimately come from paraphrasing the caller and don't need
+    literal-string anchoring.
+
+    Returns (kept, dropped_with_reason).
+    """
+    caller_text = _norm(
+        " ".join(t.text for t in transcript_window if t.role == "caller")
+    )
+    kept: list[SlotUpdate] = []
+    dropped: list[tuple[SlotUpdate, str]] = []
+    for u in updates:
+        if u.slot_path not in IDENTIFIER_SLOTS:
+            kept.append(u)
+            continue
+        value_norm = _norm(str(u.value))
+        quote_norm = _norm(u.source_quote or "")
+        if (value_norm and value_norm in caller_text) or (
+            quote_norm and quote_norm in caller_text
+        ):
+            kept.append(u)
+        else:
+            dropped.append((
+                u,
+                f"value {u.value!r} / quote {u.source_quote!r} not in caller text",
+            ))
+    return kept, dropped
+
+
 # ─── Compact extractor output schema ─────────────────────────────────────────
 # We don't want Haiku to return the full ClaimReport schema — too many fields,
 # slow, and most are null per turn. Instead we let it return a sparse update

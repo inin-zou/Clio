@@ -288,13 +288,36 @@
 }
 .show-more:hover { color: var(--text-primary); }
 
-/* ─── Transcript ──────────────────────────────────────────────────── */
-.transcript-line {
-  padding: 12px 0;
-  border-bottom: 1px solid rgba(255,255,255,0.03);
+/* ─── Transcript (chat-bubble layout) ─────────────────────────────── */
+.transcript-stream {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px;
 }
-.transcript-line:last-child { border-bottom: none; }
-.transcript-meta {
+.bubble-row {
+  display: flex;
+  width: 100%;
+}
+.bubble-row.is-caller { justify-content: flex-start; }
+.bubble-row.is-agent  { justify-content: flex-end; }
+
+.bubble {
+  max-width: 78%;
+  padding: 10px 14px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,0.04);
+}
+.bubble.is-caller {
+  background: rgba(255,255,255,0.04);
+  border-top-left-radius: 4px;
+}
+.bubble.is-agent {
+  background: rgba(50,215,75,0.08);
+  border-color: rgba(50,215,75,0.10);
+  border-top-right-radius: 4px;
+}
+.bubble-meta {
   display: flex;
   gap: 10px;
   font-family: var(--font-mono), monospace;
@@ -304,14 +327,16 @@
   text-transform: uppercase;
   margin-bottom: 4px;
 }
-.transcript-text {
+.bubble-row.is-agent .bubble-meta { justify-content: flex-end; }
+
+.bubble-text {
   font-size: 13px;
   line-height: 1.55;
   color: var(--text-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
 }
-.transcript-text.is-caller {
-  color: var(--text-secondary);
-}
+.bubble.is-caller .bubble-text { color: var(--text-secondary); }
 .entity-chip {
   display: inline-flex;
   align-items: center;
