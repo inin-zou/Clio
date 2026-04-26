@@ -33,6 +33,7 @@ from ..reasoner.schema import (
     ReadbackEvent,
 )
 from ..reasoner.state import Session
+from . import supabase_writer
 from .eventbus import EVENT_BUS
 from .messages import (
     CallerTurnBoundary,
@@ -105,6 +106,10 @@ class CallOrchestrator:
         self._cold_start_started_at = now
         system_prompt = persona.session_system_prompt(now=now)
 
+        # Create the calls row up-front so realtime subscribers see the call
+        # appear immediately, even before any transcript turns arrive.
+        await asyncio.to_thread(supabase_writer.insert_call, self.call_id)
+
         msg = SessionStart(
             call_id=self.call_id,
             livekit_room=self.livekit_room,
@@ -137,6 +142,23 @@ class CallOrchestrator:
             "reason": reason,
             "timestamp": datetime.now(UTC).isoformat(),
         })
+
+        # Persist final FNOL state to Supabase so the UI shows it past
+        # session end (and so we have a queryable record of the call).
+        try:
+            fnol_dump = self.reasoner_session.session.report.model_dump(mode="json")
+            policy_number = None
+            if self.reasoner_session.session.policy:
+                policy_number = self.reasoner_session.session.policy.policy_number
+            await asyncio.to_thread(
+                supabase_writer.update_call_ended,
+                self.call_id,
+                fnol=fnol_dump,
+                reason_ended=reason,
+                policy_number=policy_number,
+            )
+        except Exception as e:
+            logger.warning("supabase update_call_ended failed: %s", e)
 
         # Close WS
         try:
@@ -198,6 +220,17 @@ class CallOrchestrator:
             "is_final": msg.is_final,
             "timestamp": msg.timestamp.isoformat(),
         })
+        # Mirror to Supabase so the UI can subscribe to a durable channel
+        # rather than the in-process EVENT_BUS (which doesn't survive a
+        # container restart or scale event).
+        await asyncio.to_thread(
+            supabase_writer.insert_message,
+            self.call_id,
+            role=msg.role,
+            text=msg.text,
+            source=msg.source,
+            timestamp=msg.timestamp,
+        )
 
     async def _on_turn_boundary(self, msg: CallerTurnBoundary) -> None:
         """Caller paused — good moment to run the slot extractor."""
@@ -221,14 +254,24 @@ class CallOrchestrator:
         self.reasoner_session.record_readback(event)
         logger.info("call %s: readback %s = %r (%s)", self.call_id,
                     msg.slot_path, msg.final_value, msg.caller_response)
-        EVENT_BUS.publish(self.call_id, {
-            "type": "readback",
+        readback_payload = {
             "slot_path": msg.slot_path,
             "proposed_value": msg.proposed_value,
             "caller_response": msg.caller_response,
             "final_value": msg.final_value,
+        }
+        EVENT_BUS.publish(self.call_id, {
+            "type": "readback",
+            **readback_payload,
             "timestamp": msg.timestamp.isoformat(),
         })
+        await asyncio.to_thread(
+            supabase_writer.insert_event,
+            self.call_id,
+            type="readback",
+            payload=readback_payload,
+            timestamp=msg.timestamp,
+        )
 
     async def _on_session_closed(self, msg: SessionClosed) -> None:
         await self.close(reason=msg.reason or "modal closed session")
@@ -272,8 +315,7 @@ class CallOrchestrator:
                 # `applied` is list[str] of slot paths. Look up the current
                 # value from the session report so the UI can display it.
                 report_dump = session.session.report.model_dump(mode="json")
-                EVENT_BUS.publish(self.call_id, {
-                    "type": "slot_updates",
+                slot_payload = {
                     "applied": [
                         {
                             "slot_path": path,
@@ -286,8 +328,19 @@ class CallOrchestrator:
                         for r in rejected
                     ],
                     "extractor_reasoning": result.reasoning,
+                }
+                EVENT_BUS.publish(self.call_id, {
+                    "type": "slot_updates",
+                    **slot_payload,
                     "timestamp": now.isoformat(),
                 })
+                await asyncio.to_thread(
+                    supabase_writer.insert_event,
+                    self.call_id,
+                    type="slot_update",
+                    payload=slot_payload,
+                    timestamp=now,
+                )
 
             # 3. Run the intervention gate
             directive = self.gate.decide(session, now=now)
@@ -295,13 +348,23 @@ class CallOrchestrator:
                 logger.info("call %s: gate fires %s — %s", self.call_id,
                             directive.type, directive.reason)
                 await self._send(directive)
-                EVENT_BUS.publish(self.call_id, {
-                    "type": "gate_directive",
+                gate_payload = {
                     "directive_type": directive.type,
                     "reason": directive.reason,
                     "text": getattr(directive, "text", None),
+                }
+                EVENT_BUS.publish(self.call_id, {
+                    "type": "gate_directive",
+                    **gate_payload,
                     "timestamp": now.isoformat(),
                 })
+                await asyncio.to_thread(
+                    supabase_writer.insert_event,
+                    self.call_id,
+                    type="gate_fired",
+                    payload=gate_payload,
+                    timestamp=now,
+                )
 
         except asyncio.CancelledError:
             raise

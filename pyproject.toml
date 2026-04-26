@@ -23,6 +23,9 @@ dependencies = [
     # Spawning the GPU container from the Twilio webhook
     "modal>=0.64",
 
+    # Supabase — durable transcript / event store, browser-subscribable
+    "supabase>=2.7",
+
     # HTTP / SSE for monitoring API
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
