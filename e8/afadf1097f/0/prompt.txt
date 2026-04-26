@@ -1,0 +1,32 @@
+should we change this in UI :
+3 callers,
+one calm queue.
+Listen in, whisper a hint, or take over. Everything heard is already drafting a claim.
+
+---
+
+this makes sense:
+Headline (dynamic to actual state):
+  - Live: "{N} caller{s}, one calm queue." (you have it; just 1 caller when count is 1)
+
+Subtitle — match what we actually deliver:
+  - "Live transcript, structured claim. Every word the caller says becomes part of the FNOL
+   — in real time."
+
+---
+
+## Error Type
+Runtime TypeError
+
+## Error Message
+__webpack_modules__[moduleId] is not a function
+
+Next.js version: 15.5.15 (Webpack)
+
+---
+
+update README.md as well
+
+---
+
+udapte CLAUDE.md
