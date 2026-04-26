@@ -49,6 +49,14 @@ READBACK_GRACE_TURNS = 1
 READBACK_REFIRE_AFTER_TURNS = 3
 READBACK_MAX_ATTEMPTS = 3
 
+# Throttle between any two gate-issued directives. Sarah's last drip-feed
+# typically takes 3-6 seconds to play out; queueing another directive
+# during that window causes back-to-back utterances that sound like
+# stuttering ("Okay so that's X Y Z 1 2 3, is that right? Okay so
+# that's A B C D 2 2, is that right?"). 5 seconds gives the prior
+# read-back room to land + the caller a moment to respond.
+DIRECTIVE_COOLDOWN_SEC = 5.0
+
 # How many seconds of silence from the caller (no new turns) implies they're
 # wrapping up. If any critical slot is still missing at that point, fire wrap-up.
 WRAPUP_SILENCE_SECONDS = 6.0
@@ -174,6 +182,17 @@ class InterventionGate:
     def __init__(self) -> None:
         self.memory = _GateMemory()
         self.builder = DirectiveBuilder()
+        # Timestamp of the most recent directive we sent. Used to throttle
+        # back-to-back firings so Sarah's previous utterance has time to
+        # play out before we queue another (otherwise her drips overlap
+        # and she sounds like she's stuttering).
+        self._last_fired_at: datetime | None = None
+
+    def _stamp(self, directive: ReasonerDirective, now: datetime) -> ReasonerDirective:
+        """Mark when we last fired so the throttle in decide() works on
+        the next call."""
+        self._last_fired_at = now
+        return directive
 
     # The builder is exposed so other code (e.g. the orchestrator's auth flow)
     # can emit directives that share the seq counter.
@@ -192,6 +211,15 @@ class InterventionGate:
         """
         now = now or datetime.now(timezone.utc)
         s = session.session  # FNOLSession
+
+        # Throttle: if we issued a directive in the last DIRECTIVE_COOLDOWN
+        # seconds, hold off so Sarah's previous utterance has time to play
+        # out. Without this we queue back-to-back read-backs and Sarah
+        # stutters between two sentences.
+        if self._last_fired_at is not None:
+            since = (now - self._last_fired_at).total_seconds()
+            if since < DIRECTIVE_COOLDOWN_SEC:
+                return None
 
         # ── 1. Pending read-back ─────────────────────────────────────────
         # Fires when an entity-verification slot is filled but unconfirmed.
@@ -216,14 +244,14 @@ class InterventionGate:
             attempts["attempts"] += 1
             attempts["last_attempt_turn_idx"] = caller_turn_idx
             self.memory.readback_attempts[slot_path] = attempts
-            return self.builder.speak(
+            return self._stamp(self.builder.speak(
                 text=render_readback(slot_path, str(value)),
                 after_release="silent",  # hold and wait for caller's confirmation
                 reason=(
                     f"forced readback (attempt {attempts['attempts']}/"
                     f"{READBACK_MAX_ATTEMPTS}): {slot_path} unconfirmed"
                 ),
-            )
+            ), now)
 
         # ── 2. Compliance deadlines ──────────────────────────────────────
         elapsed = _seconds_since_call_start(s, now)
@@ -236,10 +264,10 @@ class InterventionGate:
             if value not in (None, "", [], {}):
                 continue  # already filled, no need
             self.memory.fired_compliance.add(slot_path)
-            return self.builder.speak(
+            return self._stamp(self.builder.speak(
                 text=_compliance_phrasing(slot_path),
                 reason=f"compliance deadline ({deadline_sec:.0f}s) hit for {slot_path}",
-            )
+            ), now)
 
         # ── 3. Wrap-up gate ──────────────────────────────────────────────
         # Only fires after the caller has spoken at least once — otherwise an
@@ -255,12 +283,12 @@ class InterventionGate:
                 missing = _missing_critical_slots(s)
                 if missing:
                     self.memory.fired_wrapup = True
-                    return self.builder.speak(
+                    return self._stamp(self.builder.speak(
                         text=_wrapup_phrasing(missing[0]),
                         after_release="resume",
                         reason=f"wrap-up gate: caller appears done but critical "
                         f"slot(s) missing: {missing}",
-                    )
+                    ), now)
                 # else: all critical slots filled, let Sarah close naturally
 
         # ── 4. Drift (disabled for MVP1) ─────────────────────────────────

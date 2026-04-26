@@ -204,6 +204,14 @@ image = (
         # in-place rather than reserving fresh ones — recommended in the
         # error message itself.
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
+        # Disable torch.compile / CUDA graph capture inside moshi. Per
+        # the PersonaPlex HF discussion, CUDA graphs pin GPU memory that
+        # `torch.cuda.empty_cache()` and `reset_streaming()` can't
+        # release, leading to ~1.75GB/min leak and OOM around 12 min in.
+        # Tradeoff: per-frame inference is somewhat slower (no graph
+        # optimization) — measure that we stay under the 80ms/frame
+        # budget. If we don't, switch to gpu="A100-80GB" instead.
+        "TORCHDYNAMO_DISABLE": "1",
     })
 )
 
@@ -316,6 +324,7 @@ class PersonaPlexService:
         work. Returns elapsed seconds for telemetry.
         """
         import gc
+        import time
 
         import torch
 
@@ -1438,7 +1447,11 @@ PAD_TOKEN_ID = 3
 # if extractor fires too eagerly mid-thought.
 RMS_SILENCE_THRESHOLD = 0.005       # below this is "silent"
 SILENCE_FRAMES_FOR_BOUNDARY = 10    # 10 × 80ms = 800ms
-SPEECH_FRAMES_FOR_TURN_START = 2    # debounce — 160ms above threshold to count
+# Brief caller acknowledgments ("okay", "yeah") last ~200-300ms. If we
+# treat 160ms (2 frames) as "caller is speaking", we end up suppressing
+# Sarah mid-readback every time the caller mumbles agreement. 4 frames
+# (320ms) is past most short ack words but still catches real turns.
+SPEECH_FRAMES_FOR_TURN_START = 4
 
 
 class TurnBoundaryDetector:

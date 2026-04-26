@@ -98,11 +98,16 @@ class CallOrchestrator:
         self._cold_start_started_at: datetime | None = None
 
         # Backend-side ReadbackOutcome detection. When the gate forces a
-        # read-back, we record (slot_path, value) here. The next caller
-        # transcript is pattern-matched against confirm/correct phrases;
+        # read-back, we APPEND (slot_path, value) here. The caller's next
+        # transcript is pattern-matched against confirm/correct/both/all;
         # on a match we synthesize a ReadbackEvent locally so the gate's
         # confirmed_slots() updates and it stops re-firing.
-        self._pending_readback: dict | None = None
+        #
+        # FIFO list (not single-slot) because the gate can issue several
+        # readbacks back-to-back (e.g. policy_number + license_plate),
+        # and a caller's "Yeah" needs to confirm the right one. "Both"
+        # / "all" / "all of them" → confirm every pending entry at once.
+        self._pending_readbacks: list[dict] = []
 
     # ─── Setup / teardown ────────────────────────────────────────────────
 
@@ -221,49 +226,66 @@ class CallOrchestrator:
         )
 
         # If we forced a read-back recently and this is the caller's
-        # response, try to match it against confirm/correct/unclear and
-        # synthesize a ReadbackEvent locally. Without this loop the gate
-        # never sees the slot as confirmed and re-fires until it gives up.
+        # response, try to match it against confirm/correct/unclear/
+        # confirm-all and synthesize ReadbackEvent(s) locally. Without
+        # this loop the gate never sees the slot as confirmed and
+        # re-fires until it gives up.
         if (
             msg.role == "caller"
             and msg.source == "scribe"  # Scribe transcripts are the clean signal
-            and self._pending_readback is not None
+            and self._pending_readbacks
         ):
             outcome = _classify_readback_response(msg.text)
-            if outcome is not None:
-                pending = self._pending_readback
-                self._pending_readback = None
-                event = ReadbackEvent(
-                    slot_path=pending["slot_path"],
-                    proposed_value=pending["value"],
-                    caller_response=outcome["response"],
-                    final_value=outcome["final_value"] or pending["value"],
-                    timestamp=msg.timestamp,
-                    attempt=self.reasoner_session.attempts_for_slot(
-                        pending["slot_path"]
-                    ) + 1,
-                )
-                self.reasoner_session.record_readback(event)
-                logger.info(
-                    "call %s: auto-detected readback %s = %r (%s)",
-                    self.call_id,
-                    event.slot_path,
-                    event.final_value,
-                    event.caller_response,
-                )
-                # Mirror to event bus + supabase so UI sees confirmation
-                payload = event.model_dump(mode="json")
-                EVENT_BUS.publish(self.call_id, {
-                    "type": "readback",
-                    **payload,
-                })
-                await asyncio.to_thread(
-                    supabase_writer.insert_event,
-                    self.call_id,
-                    type="readback",
-                    payload=payload,
-                    timestamp=msg.timestamp,
-                )
+            confirm_all = _matches_confirm_all(msg.text)
+            if outcome is not None or confirm_all:
+                # confirm_all always confirms every pending entry. Single
+                # confirm/correct only consumes the OLDEST pending — the
+                # rest stay queued for the next caller utterance.
+                if confirm_all:
+                    to_resolve = list(self._pending_readbacks)
+                    self._pending_readbacks = []
+                else:
+                    to_resolve = [self._pending_readbacks.pop(0)]
+
+                for pending in to_resolve:
+                    response = (
+                        outcome["response"] if outcome else "confirmed"
+                    )
+                    final_value = (
+                        (outcome and outcome["final_value"])
+                        or pending["value"]
+                    )
+                    event = ReadbackEvent(
+                        slot_path=pending["slot_path"],
+                        proposed_value=pending["value"],
+                        caller_response=response,
+                        final_value=final_value,
+                        timestamp=msg.timestamp,
+                        attempt=self.reasoner_session.attempts_for_slot(
+                            pending["slot_path"]
+                        ) + 1,
+                    )
+                    self.reasoner_session.record_readback(event)
+                    logger.info(
+                        "call %s: auto-detected readback %s = %r (%s%s)",
+                        self.call_id,
+                        event.slot_path,
+                        event.final_value,
+                        event.caller_response,
+                        ", via confirm-all" if confirm_all else "",
+                    )
+                    payload = event.model_dump(mode="json")
+                    EVENT_BUS.publish(self.call_id, {
+                        "type": "readback",
+                        **payload,
+                    })
+                    await asyncio.to_thread(
+                        supabase_writer.insert_event,
+                        self.call_id,
+                        type="readback",
+                        payload=payload,
+                        timestamp=msg.timestamp,
+                    )
         EVENT_BUS.publish(self.call_id, {
             "type": "transcript",
             "role": msg.role,
@@ -401,9 +423,9 @@ class CallOrchestrator:
                             directive.type, directive.reason)
                 await self._send(directive)
 
-                # If the gate fired a read-back, remember which slot is
-                # awaiting confirmation so the next caller transcript can
-                # be pattern-matched and turned into a ReadbackEvent.
+                # If the gate fired a read-back, append to the pending
+                # queue so the next caller transcript can be pattern-
+                # matched and turned into a ReadbackEvent.
                 if "forced readback" in directive.reason:
                     slot_path = _slot_from_readback_reason(directive.reason)
                     if slot_path:
@@ -411,14 +433,21 @@ class CallOrchestrator:
                             session.session.report.model_dump(mode="json"),
                             slot_path,
                         )
-                        self._pending_readback = {
+                        # Drop any older pending entry for the SAME slot
+                        # (a re-fire supersedes its own previous attempt).
+                        self._pending_readbacks = [
+                            p for p in self._pending_readbacks
+                            if p["slot_path"] != slot_path
+                        ]
+                        self._pending_readbacks.append({
                             "slot_path": slot_path,
                             "value": str(value) if value is not None else "",
                             "issued_at": now,
-                        }
+                        })
                         logger.debug(
-                            "call %s: awaiting confirmation for %s = %r",
+                            "call %s: queued readback %s = %r (pending=%d)",
                             self.call_id, slot_path, value,
+                            len(self._pending_readbacks),
                         )
 
                 gate_payload = {
@@ -543,6 +572,28 @@ _CONFIRM_PATTERNS = (
     r"\baffirmative\b",
     r"\bmm-?hm+\b",
 )
+
+
+_CONFIRM_ALL_PATTERNS = (
+    r"\ball of (them|those|that)\b",
+    r"\bboth\b",
+    r"\beverything\b",
+    r"\bcorrect.{0,15}both\b",
+    r"\byes.{0,5}both\b",
+    r"\byeah.{0,5}both\b",
+    r"\bboth.{0,15}correct\b",
+    r"\bboth.{0,15}right\b",
+)
+
+
+def _matches_confirm_all(text: str) -> bool:
+    """Detect 'both/all/everything' style confirmations that should
+    accept every pending readback at once. Used in addition to the
+    per-slot classifier so 'Correct, both of them' counts."""
+    if not text:
+        return False
+    t = text.lower().strip()
+    return any(re.search(p, t) for p in _CONFIRM_ALL_PATTERNS)
 
 
 def _classify_readback_response(text: str) -> dict | None:
