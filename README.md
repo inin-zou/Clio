@@ -2,6 +2,31 @@
 
 Voice agent for inbound insurance claim calls. Built for the [Inca hackathon](https://www.get-inca.com/en) — the agent must convince jurors they're talking to a human while collecting complete FNOL documentation.
 
+## Why full-duplex, not ASR → LLM → TTS
+
+Clio runs on **PersonaPlex 7B** (NVIDIA's fork of Kyutai's [Moshi](https://kyutai.org/Moshi.pdf)) — an end-to-end full-duplex speech LLM that consumes caller audio and emits agent audio **simultaneously**, frame-by-frame at 12.5Hz. No separate ASR / LLM / TTS stages. The model's text head and audio head run in lock-step every 80ms, so the agent can listen and speak at the same time the way humans actually do.
+
+Same architectural bet as ByteDance's [**Seeduplex**](https://seed.bytedance.com/en/seeduplex) (announced **April 9, 2026**, deployed on Doubao at scale weeks before this hackathon) — that the way to feel human is to **remove turn-taking entirely**, not to optimize gaps in a half-duplex pipeline.
+
+### Latency: 450-650ms round-trip vs 1.5-3.5s for half-duplex
+
+| Stack | Round-trip | Why |
+|---|---|---|
+| **Half-duplex** (ASR → LLM → TTS, e.g. Pipecat / Vapi / classic Twilio voice) | **1.5-3.5 s** | Sequential: pause detection (500-1000ms) → ASR (200-500ms) → LLM generate (500-1500ms) → TTS synth (200-800ms). Each stage waits for the previous one to finish. |
+| **Full-duplex** (Clio / PersonaPlex / Seeduplex / Moshi) | **~450-650 ms** | Single per-frame inference (~80ms), audio and text heads run together, no turn-taking gap. We measured this on the Modal A100 path — see [How we got latency under 800ms](#how-we-got-latency-under-800ms). |
+
+Inca's "feels human" threshold is around 800ms round-trip. **A half-duplex stack would not clear that bar regardless of how fast each individual model is** — the sequential floor is too high. Full-duplex eliminates the floor.
+
+### Tool calling / RAG: shaped by MoshiRAG + ASPIRin
+
+The intervention gate + drip-feed pattern (`backend/app/reasoner/`) draws on two recent full-duplex papers (both 2026, both code-unreleased):
+
+- [**MoshiRAG**](https://arxiv.org/abs/2604.12928) (Kyutai, Apr 2026) — answers *"how do you push external knowledge into a full-duplex model mid-utterance without making it pause?"* Their solution: a `⟨ret⟩` trigger token + async retrieval + lead-portion filler ("hmm, let me think...") that buys time while retrieval lands. Clio uses the same three-segment shape (lead → body → tail) but simpler: templated text injection via the drip queue instead of learned embedding retrieval. See [`.claude/docs/moshirag-analysis.md`](.claude/docs/moshirag-analysis.md).
+
+- [**ASPIRin**](https://arxiv.org/abs/2604.10065) (NTU + NVIDIA, Apr 2026) — answers *"how do you RL-train a full-duplex model to learn when to speak without breaking what it says?"* Their insight: project the action space onto a binary {speak, silent} decision, RL only on that, leave token-content distribution untouched. We don't fine-tune (no RL in MVP), but the principle informs the architecture: **timing and intervention decisions live in the Python gate, not in the model's prompt**, so we never destabilize PersonaPlex's natural conversational fluency. See [`.claude/docs/aspirin-analysis.md`](.claude/docs/aspirin-analysis.md).
+
+The Tavily fact-checker module (`backend/app/reasoner/tavily.py`) implements the MoshiRAG-shaped retrieval primitive — built but currently unwired for latency reasons (see "Optional: Tavily fact-checker" below).
+
 See [`.claude/docs/architecture-decision.md`](.claude/docs/architecture-decision.md) for the full design rationale.
 
 ## High-level architecture
