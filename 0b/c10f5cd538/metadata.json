@@ -1,0 +1,34 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "0bc10f5cd538",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 34,
+  "files_touched": [
+    "backend/app/control/orchestrator.py",
+    "backend/app/reasoner/drip.py",
+    "backend/app/reasoner/extractor.py",
+    "backend/app/reasoner/gate.py",
+    "backend/app/reasoner/persona.py",
+    "backend/tests/test_control_orchestrator.py",
+    "frontend/app/globals.css",
+    "frontend/app/page.tsx",
+    "frontend/lib/derive.ts",
+    "model_service/deploy/modal_app.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/0b/c10f5cd538/0/metadata.json",
+      "transcript": "/0b/c10f5cd538/0/full.jsonl",
+      "content_hash": "/0b/c10f5cd538/0/content_hash.txt",
+      "prompt": "/0b/c10f5cd538/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 2855,
+    "cache_creation_tokens": 558446,
+    "cache_read_tokens": 47782934,
+    "output_tokens": 246058,
+    "api_call_count": 195
+  }
+}
