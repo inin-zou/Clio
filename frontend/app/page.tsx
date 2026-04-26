@@ -186,11 +186,19 @@ export default function Page() {
         >
           <div style={{ maxWidth: 640 }}>
             <h1 className="display" style={{ fontSize: 60, marginBottom: 18 }}>
-              {activeCalls.length > 0
-                ? `${activeCalls.length} caller${activeCalls.length > 1 ? "s" : ""},`
-                : "No active calls,"}
-              <br />
-              one calm queue.
+              {activeCalls.length > 0 ? (
+                <>
+                  {`${activeCalls.length} caller${activeCalls.length > 1 ? "s" : ""},`}
+                  <br />
+                  one calm queue.
+                </>
+              ) : (
+                <>
+                  Inbound claims,
+                  <br />
+                  drafted as they speak.
+                </>
+              )}
             </h1>
             <p
               style={{
@@ -202,8 +210,8 @@ export default function Page() {
                 maxWidth: 540,
               }}
             >
-              Listen in, whisper a hint, or take over. Everything heard is
-              already drafting a claim.
+              Live transcript, structured claim. Every word the caller says
+              becomes part of the FNOL — in real time.
             </p>
           </div>
           {error && (
