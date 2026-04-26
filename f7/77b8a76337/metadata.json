@@ -1,0 +1,33 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "f777b8a76337",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 7,
+  "files_touched": [
+    "README.md",
+    "backend/app/reasoner/persona.py",
+    "frontend/app/favicon.ico",
+    "frontend/app/globals.css",
+    "frontend/app/layout.tsx",
+    "frontend/app/page.tsx",
+    "frontend/lib/derive.ts",
+    "frontend/public/bg.png",
+    "model_service/deploy/modal_app.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/f7/77b8a76337/0/metadata.json",
+      "transcript": "/f7/77b8a76337/0/full.jsonl",
+      "content_hash": "/f7/77b8a76337/0/content_hash.txt",
+      "prompt": "/f7/77b8a76337/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 99,
+    "cache_creation_tokens": 861627,
+    "cache_read_tokens": 41161687,
+    "output_tokens": 66242,
+    "api_call_count": 54
+  }
+}

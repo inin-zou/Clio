@@ -1,0 +1,48 @@
+thats okay, but we notice GPU release still now working:
+ 026-04-26 04:28:03,979 [personaplex.process_call] INFO call eb3a5ca46d18fa86: caller turn boundary #16
+2026-04-26 04:28:05,003 [personaplex.process_call] INFO call eb3a5ca46d18fa86: scribe final: 'No.'
+2026-04-26 04:28:07,470 [personaplex.process_call] INFO call eb3a5ca46d18fa86: scribe final: "No, I don't think so."
+2026-04-26 04:28:09,818 [personaplex.process_call] INFO call eb3a5ca46d18fa86: caller turn boundary #17
+2026-04-26 04:28:11,001 [personaplex.process_call] INFO call eb3a5ca46d18fa86: scribe final: 'You too.'
+2026-04-26 04:28:11,947 [personaplex.process_call] INFO call eb3a5ca46d18fa86: caller disconnected (identity=sip_+4917684071300)
+2026-04-26 04:28:11,947 [personaplex.process_call] INFO call eb3a5ca46d18fa86: ending loop (caller left)
+2026-04-26 04:28:11,955 [personaplex.process_call] INFO call eb3a5ca46d18fa86: inference loop ended after 1976 frames (169.9s)
+2026-04-26 04:28:14,002 [personaplex.process_call] INFO call eb3a5ca46d18fa86: post-call rebuild in 1.8s — GPU 37.2GB used / 42.4GB
+⠇ Running (1/1 containers active)... View app at N
+
+---
+
+can you see what's the gap between the frontend design with mockdata in desktop (Clio.zip) and our current backend system?
+
+---
+
+let's use this design to redo our frontend UI?
+
+---
+
+let's use this design to redo our frontend UI? but only tier 1 first
+
+---
+
+can you change the background to the one we use in the clio.zip
+
+---
+
+can you look the most recent inbound call
+
+---
+
+yes
+
+---
+
+no i think you're last change on them is bit too strong
+
+---
+
+no i think you're last change on model is bit too strong
+they are not pranksters, they are serious callers that been pissed off by Sara not listening to them
+
+---
+
+also update a files gotchas.md under .claude that documents how we finetune the model
