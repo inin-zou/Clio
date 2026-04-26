@@ -3,21 +3,38 @@
 import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import type { Call, EventRow, Message } from "@/lib/types";
+import {
+  callCode,
+  callerDisplayName,
+  elapsedLabel,
+  fnolDraftFields,
+  fnolPercent,
+  incidentTypeLabel,
+  locationDetail,
+  statusOf,
+} from "@/lib/derive";
 
-const RECENT_CALL_LIMIT = 10;
+const RECENT_CALL_LIMIT = 12;
 
 export default function Page() {
+  const [tab, setTab] = useState<"ops" | "vault">("ops");
   const [calls, setCalls] = useState<Call[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [events, setEvents] = useState<EventRow[]>([]);
   const [error, setError] = useState<string | null>(null);
 
-  // ─── Initial load: recent calls ───────────────────────────────────────
+  // Tick every second so elapsed times update.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // ─── Initial load: recent calls + realtime sub ─────────────────────
   useEffect(() => {
     const sb = supabase();
     let cancelled = false;
-
     (async () => {
       const { data, error } = await sb
         .from("calls")
@@ -29,14 +46,13 @@ export default function Page() {
         setError(error.message);
         return;
       }
-      setCalls((data as Call[]) ?? []);
-      // Auto-pick the most recent active call (no ended_at) or the latest.
-      const active = (data as Call[] | null)?.find((c) => !c.ended_at);
-      if (!selectedId) setSelectedId((active ?? data?.[0])?.id ?? null);
+      const list = (data as Call[]) ?? [];
+      setCalls(list);
+      const active = list.find((c) => !c.ended_at);
+      setSelectedId((s) => s ?? (active ?? list[0])?.id ?? null);
     })();
 
-    // Subscribe to new/updated calls so the sidebar stays current.
-    const callsCh = sb
+    const ch = sb
       .channel("calls-list")
       .on(
         "postgres_changes",
@@ -54,9 +70,9 @@ export default function Page() {
             }
             return next.slice(0, RECENT_CALL_LIMIT);
           });
-          // If a brand-new call appears and nothing is selected yet, jump to it.
-          if (payload.eventType === "INSERT" && !selectedId) {
-            setSelectedId((payload.new as Call).id);
+          if (payload.eventType === "INSERT") {
+            const id = (payload.new as Call).id;
+            setSelectedId((s) => s ?? id);
           }
         },
       )
@@ -64,30 +80,21 @@ export default function Page() {
 
     return () => {
       cancelled = true;
-      sb.removeChannel(callsCh);
+      sb.removeChannel(ch);
     };
-  }, [selectedId]);
+  }, []);
 
-  // ─── Per-call: load history + subscribe to realtime ───────────────────
+  // ─── Per-call: history + realtime ──────────────────────────────────
   useEffect(() => {
     if (!selectedId) return;
     const sb = supabase();
     let cancelled = false;
-
     (async () => {
       const [m, e] = await Promise.all([
-        sb
-          .from("messages")
-          .select("*")
-          .eq("call_id", selectedId)
-          .order("timestamp", { ascending: true })
-          .limit(500),
-        sb
-          .from("events")
-          .select("*")
-          .eq("call_id", selectedId)
-          .order("timestamp", { ascending: true })
-          .limit(500),
+        sb.from("messages").select("*").eq("call_id", selectedId)
+          .order("timestamp", { ascending: true }).limit(500),
+        sb.from("events").select("*").eq("call_id", selectedId)
+          .order("timestamp", { ascending: true }).limit(500),
       ]);
       if (cancelled) return;
       setMessages((m.data as Message[]) ?? []);
@@ -98,27 +105,15 @@ export default function Page() {
       .channel(`call-${selectedId}`)
       .on(
         "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "messages",
-          filter: `call_id=eq.${selectedId}`,
-        },
-        (payload) => {
-          setMessages((prev) => [...prev, payload.new as Message]);
-        },
+        { event: "INSERT", schema: "public", table: "messages",
+          filter: `call_id=eq.${selectedId}` },
+        (payload) => setMessages((p) => [...p, payload.new as Message]),
       )
       .on(
         "postgres_changes",
-        {
-          event: "INSERT",
-          schema: "public",
-          table: "events",
-          filter: `call_id=eq.${selectedId}`,
-        },
-        (payload) => {
-          setEvents((prev) => [...prev, payload.new as EventRow]);
-        },
+        { event: "INSERT", schema: "public", table: "events",
+          filter: `call_id=eq.${selectedId}` },
+        (payload) => setEvents((p) => [...p, payload.new as EventRow]),
       )
       .subscribe();
 
@@ -128,216 +123,567 @@ export default function Page() {
     };
   }, [selectedId]);
 
+  const callsOldFirst = useMemo(() => [...calls].reverse(), [calls]);
+  const callIndexById = useMemo(() => {
+    const m = new Map<string, number>();
+    callsOldFirst.forEach((c, i) => m.set(c.id, i));
+    return m;
+  }, [callsOldFirst]);
+
+  // Active calls = first three currently-live, fall back to most-recent.
+  const activeCalls = useMemo(() => {
+    const live = calls.filter((c) => !c.ended_at);
+    if (live.length >= 1) return live.slice(0, 3);
+    return calls.slice(0, 3);
+  }, [calls]);
+
+  const recentClaims = useMemo(() => {
+    return calls.filter((c) => c.ended_at).slice(0, 6);
+  }, [calls]);
+
   const selectedCall = useMemo(
     () => calls.find((c) => c.id === selectedId) ?? null,
     [calls, selectedId],
   );
 
-  // Merge messages + events into one chronological feed for the main pane.
-  const feed = useMemo(() => {
-    const items: Array<
-      | { kind: "message"; row: Message }
-      | { kind: "event"; row: EventRow }
-    > = [
-      ...messages.map((row) => ({ kind: "message" as const, row })),
-      ...events.map((row) => ({ kind: "event" as const, row })),
-    ];
-    items.sort((a, b) =>
-      a.row.timestamp < b.row.timestamp
-        ? -1
-        : a.row.timestamp > b.row.timestamp
-          ? 1
-          : 0,
-    );
-    return items;
-  }, [messages, events]);
-
-  // Latest known value per slot path (from slot_update events).
-  const slots = useMemo(() => {
-    const out = new Map<string, unknown>();
-    for (const ev of events) {
-      if (ev.type !== "slot_update") continue;
-      const applied = (ev.payload as { applied?: Array<{ slot_path: string; value: unknown }> })
-        .applied ?? [];
-      for (const u of applied) {
-        if (u.value !== null && u.value !== undefined) {
-          out.set(u.slot_path, u.value);
-        }
-      }
-    }
-    return out;
-  }, [events]);
+  // KPI: average call duration over completed calls in the visible list.
+  const avgFnolLabel = useMemo(() => {
+    const completed = calls.filter((c) => c.ended_at);
+    if (completed.length === 0) return "—";
+    const totalSec = completed.reduce((acc, c) => {
+      const start = Date.parse(c.started_at);
+      const end = c.ended_at ? Date.parse(c.ended_at) : start;
+      return acc + Math.max(0, (end - start) / 1000);
+    }, 0);
+    const avg = totalSec / completed.length;
+    const m = Math.floor(avg / 60);
+    const s = Math.round(avg % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+  }, [calls]);
 
   return (
-    <main className="grid grid-cols-[260px_1fr_340px] h-screen">
-      {/* ─── Left: recent calls ───────────────────────────── */}
-      <aside className="border-r border-[#222630] overflow-y-auto p-3">
-        <h2 className="text-xs uppercase tracking-widest text-muted mb-2 px-2">
-          Recent calls
-        </h2>
-        {error && (
-          <div className="text-xs text-gate p-2">{error}</div>
-        )}
-        {calls.length === 0 && (
-          <div className="text-xs text-muted p-2">no calls yet</div>
-        )}
-        {calls.map((c) => {
-          const active = !c.ended_at;
-          const selected = c.id === selectedId;
-          return (
-            <button
-              key={c.id}
-              onClick={() => setSelectedId(c.id)}
-              className={`w-full text-left px-3 py-2 rounded mb-1 text-sm transition ${
-                selected
-                  ? "bg-panel text-ink"
-                  : "hover:bg-panel/60 text-muted"
-              }`}
-            >
-              <div className="flex items-center gap-2">
-                <span
-                  className={`inline-block w-2 h-2 rounded-full ${
-                    active ? "bg-agent animate-pulse" : "bg-muted/50"
-                  }`}
-                />
-                <span className="font-mono text-xs truncate flex-1">
-                  {c.id}
-                </span>
-              </div>
-              <div className="text-[10px] text-muted mt-1">
-                {new Date(c.started_at).toLocaleTimeString()}
-                {c.policy_number && ` · ${c.policy_number}`}
-              </div>
-            </button>
-          );
-        })}
-      </aside>
+    <>
+      <div className="env-bg" />
+      <TopToolbar tab={tab} setTab={setTab} />
 
-      {/* ─── Middle: live feed ────────────────────────────── */}
-      <section className="overflow-y-auto p-6">
-        {!selectedCall && (
-          <div className="text-muted text-sm">
-            Select a call from the left to view its live transcript.
-          </div>
-        )}
-        {selectedCall && (
-          <>
-            <h1 className="text-xs uppercase tracking-widest text-muted mb-1">
-              Live transcript
+      <main
+        style={{
+          position: "relative",
+          zIndex: 1,
+          maxWidth: 1480,
+          margin: "0 auto",
+          padding: "108px 40px 72px",
+        }}
+      >
+        <header
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "flex-end",
+            marginBottom: 56,
+            gap: 32,
+          }}
+        >
+          <div style={{ maxWidth: 640 }}>
+            <h1 className="display" style={{ fontSize: 60, marginBottom: 18 }}>
+              {activeCalls.length > 0
+                ? `${activeCalls.length} caller${activeCalls.length > 1 ? "s" : ""},`
+                : "No active calls,"}
+              <br />
+              one calm queue.
             </h1>
-            <p className="text-xs text-muted mb-4 font-mono">
-              {selectedCall.id}
-              {selectedCall.ended_at
-                ? " · ended"
-                : " · live"}
+            <p
+              style={{
+                color: "var(--text-secondary)",
+                fontSize: 16,
+                lineHeight: 1.55,
+                margin: 0,
+                letterSpacing: "-0.005em",
+                maxWidth: 540,
+              }}
+            >
+              Listen in, whisper a hint, or take over. Everything heard is
+              already drafting a claim.
             </p>
-            <div className="space-y-2">
-              {feed.length === 0 && (
-                <div className="text-muted italic text-sm">
-                  Waiting for first event…
-                </div>
-              )}
-              {feed.map((item) =>
-                item.kind === "message" ? (
-                  <MessageRow key={`m-${item.row.id}`} m={item.row} />
-                ) : (
-                  <EventRowView key={`e-${item.row.id}`} e={item.row} />
-                ),
-              )}
+          </div>
+          {error && (
+            <div
+              style={{
+                color: "var(--status-error)",
+                fontSize: 12,
+                fontFamily: "var(--font-mono)",
+              }}
+            >
+              {error}
             </div>
-          </>
-        )}
-      </section>
+          )}
+        </header>
 
-      {/* ─── Right: FNOL state ────────────────────────────── */}
-      <aside className="border-l border-[#222630] overflow-y-auto p-4 bg-panel">
-        <h2 className="text-xs uppercase tracking-widest text-muted mb-3">
-          FNOL state
-        </h2>
-        {slots.size === 0 && (
-          <div className="text-xs text-muted italic">
-            no slots filled yet
-          </div>
-        )}
-        {Array.from(slots.entries()).map(([path, value]) => (
-          <div
-            key={path}
-            className="mb-2 p-2 rounded bg-slot/10 border-l-2 border-slot"
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "260px 1fr 280px",
+            gap: 32,
+            alignItems: "start",
+          }}
+        >
+          {/* ─── LEFT: active calls ─── */}
+          <aside
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 4,
+              paddingTop: 8,
+            }}
           >
-            <div className="text-[10px] text-muted">{path}</div>
-            <div className="text-sm break-words">
-              {typeof value === "object"
-                ? JSON.stringify(value)
-                : String(value)}
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "baseline",
+                padding: "0 16px 12px",
+              }}
+            >
+              <h3 className="section-title">Active</h3>
+              <span className="meta-label">
+                {activeCalls.length} of {calls.length}
+              </span>
             </div>
-          </div>
-        ))}
-        {selectedCall?.fnol && (
-          <details className="mt-6">
-            <summary className="text-xs text-muted cursor-pointer mb-2">
-              full FNOL JSON
-            </summary>
-            <pre className="text-[10px] overflow-x-auto bg-bg p-2 rounded">
-              {JSON.stringify(selectedCall.fnol, null, 2)}
-            </pre>
-          </details>
-        )}
-      </aside>
-    </main>
+            {activeCalls.length === 0 && (
+              <div
+                style={{
+                  padding: "12px 16px",
+                  color: "var(--text-tertiary)",
+                  fontSize: 12,
+                }}
+              >
+                No calls yet. Dial the number.
+              </div>
+            )}
+            {activeCalls.map((c) => (
+              <CallRowSidebar
+                key={c.id}
+                call={c}
+                code={callCode(c, callIndexById.get(c.id) ?? 0)}
+                selected={c.id === selectedId}
+                onClick={() => setSelectedId(c.id)}
+                now={now}
+              />
+            ))}
+          </aside>
+
+          {/* ─── MIDDLE: hero call ─── */}
+          {selectedCall ? (
+            <HeroCall
+              call={selectedCall}
+              code={callCode(selectedCall, callIndexById.get(selectedCall.id) ?? 0)}
+              messages={messages}
+              now={now}
+            />
+          ) : (
+            <section
+              className="glass"
+              style={{
+                padding: 60,
+                color: "var(--text-tertiary)",
+                fontSize: 14,
+              }}
+            >
+              Select a call to view its live transcript.
+            </section>
+          )}
+
+          {/* ─── RIGHT: recent + KPIs ─── */}
+          <aside
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: 36,
+              paddingTop: 8,
+            }}
+          >
+            <div>
+              <h3 className="section-title" style={{ marginBottom: 10 }}>
+                Recent claims
+              </h3>
+              <div>
+                {recentClaims.length === 0 && (
+                  <div
+                    style={{
+                      color: "var(--text-tertiary)",
+                      fontSize: 12,
+                      padding: "8px 14px",
+                    }}
+                  >
+                    No completed calls yet.
+                  </div>
+                )}
+                {recentClaims.map((c) => (
+                  <ClaimRow
+                    key={c.id}
+                    call={c}
+                    onClick={() => setSelectedId(c.id)}
+                  />
+                ))}
+              </div>
+            </div>
+            <div>
+              <h3 className="section-title" style={{ marginBottom: 14 }}>
+                This window
+              </h3>
+              <div style={{ display: "flex", gap: 28 }}>
+                <div className="kpi">
+                  <span className="kpi-label">Avg FNOL</span>
+                  <span className="kpi-value">{avgFnolLabel}</span>
+                </div>
+                <div className="hairline-y" />
+                <div className="kpi">
+                  <span className="kpi-label">Total calls</span>
+                  <span className="kpi-value">{calls.length}</span>
+                </div>
+              </div>
+            </div>
+          </aside>
+        </div>
+      </main>
+    </>
   );
 }
 
-function MessageRow({ m }: { m: Message }) {
-  const colorClass = m.role === "caller" ? "text-caller" : "text-agent";
+// ───────────────────────────────────────────────────────────────────
+// Subcomponents
+// ───────────────────────────────────────────────────────────────────
+
+function TopToolbar({
+  tab,
+  setTab,
+}: {
+  tab: "ops" | "vault";
+  setTab: (t: "ops" | "vault") => void;
+}) {
   return (
-    <div className="grid grid-cols-[64px_1fr_100px] gap-3 py-1.5 px-3 rounded hover:bg-panel/40">
-      <div className={`text-xs font-semibold ${colorClass}`}>
-        {m.role.toUpperCase()}
+    <header className="top-toolbar">
+      <span className="toolbar-brand">clio</span>
+      <div className="toolbar-segments">
+        {(
+          [
+            { id: "ops", label: "Operations" },
+            { id: "vault", label: "Context Vault" },
+          ] as const
+        ).map((t) => (
+          <button
+            key={t.id}
+            className={`toolbar-seg ${tab === t.id ? "is-active" : ""}`}
+            onClick={() => setTab(t.id)}
+          >
+            {t.label}
+          </button>
+        ))}
       </div>
-      <div className="text-sm leading-relaxed">{m.text}</div>
-      <div className="text-[10px] text-muted text-right">
-        {m.source ?? ""} · {new Date(m.timestamp).toLocaleTimeString()}
+      <span className="toolbar-meta">v1.0 · beta</span>
+    </header>
+  );
+}
+
+function CallRowSidebar({
+  call,
+  code,
+  selected,
+  onClick,
+  now,
+}: {
+  call: Call;
+  code: string;
+  selected: boolean;
+  onClick: () => void;
+  now: number;
+}) {
+  const status = statusOf(call);
+  const dotClass =
+    status.kind === "live"
+      ? "dot-live"
+      : status.kind === "review"
+        ? "dot-review"
+        : "dot-ended";
+  return (
+    <div
+      className={`call-row ${selected ? "is-selected" : ""}`}
+      onClick={onClick}
+    >
+      <div className="call-row-top">
+        <span className={`dot ${dotClass}`} />
+        <span className="status-text">
+          {status.label} · {elapsedLabel(call, now)}
+        </span>
+      </div>
+      <div className="call-row-name">{callerDisplayName(call)}</div>
+      <div className="call-row-meta">
+        {incidentTypeLabel(call)} · {locationDetail(call)} · FNOL{" "}
+        {fnolPercent(call)}%
+      </div>
+      <div
+        className="meta-label"
+        style={{ marginTop: 6, fontSize: 9 }}
+      >
+        {code}
       </div>
     </div>
   );
 }
 
-function EventRowView({ e }: { e: EventRow }) {
-  let label = "";
-  let cls = "text-muted";
-  switch (e.type) {
-    case "slot_update": {
-      const applied = (e.payload as { applied?: Array<{ slot_path: string; value: unknown }> })
-        .applied ?? [];
-      label = `📋 ${applied
-        .map(
-          (u) =>
-            `${u.slot_path} = ${typeof u.value === "object" ? JSON.stringify(u.value) : u.value}`,
-        )
-        .join(", ")}`;
-      cls = "text-slot";
-      break;
-    }
-    case "gate_fired": {
-      const p = e.payload as { reason?: string; text?: string };
-      label = `🛎  gate: ${p.reason ?? ""}${p.text ? ` — "${p.text}"` : ""}`;
-      cls = "text-gate";
-      break;
-    }
-    case "readback": {
-      const p = e.payload as {
-        slot_path?: string;
-        caller_response?: string;
-        final_value?: string;
-      };
-      label = `↩ readback ${p.slot_path} → ${p.caller_response} (${p.final_value})`;
-      cls = "text-[#ffd9a8]";
-      break;
-    }
-    default:
-      label = `${e.type}: ${JSON.stringify(e.payload)}`;
+function ClaimRow({ call, onClick }: { call: Call; onClick: () => void }) {
+  const fraudFlags = (call.fnol as Record<string, unknown> | null)?.[
+    "fraud_flags"
+  ] as unknown[] | undefined;
+  const flagged = Array.isArray(fraudFlags) && fraudFlags.length > 0;
+  const cls = flagged ? "is-flagged" : "";
+  const status = flagged ? "FLAGGED" : "REVIEW";
+  return (
+    <div className="claim-row" onClick={onClick} style={{ cursor: "pointer" }}>
+      <span>
+        <span className="claim-row-name">{callerDisplayName(call)}</span>
+        <span className="claim-row-type"> · {incidentTypeLabel(call)}</span>
+      </span>
+      <span className={`claim-row-status ${cls}`}>{status}</span>
+    </div>
+  );
+}
+
+function VoiceRibbon({
+  kind,
+  amp = 12,
+  freq = 0.012,
+}: {
+  kind: "agent" | "caller";
+  amp?: number;
+  freq?: number;
+}) {
+  const w = 1600;
+  const h = 96;
+  const phase = kind === "agent" ? 0 : Math.PI / 2;
+  const points: string[] = [];
+  for (let x = 0; x <= w; x += 6) {
+    const y =
+      h / 2 +
+      Math.sin(x * freq + phase) * amp +
+      Math.sin(x * freq * 0.5) * (amp * 0.35);
+    points.push(`${x},${y.toFixed(1)}`);
   }
   return (
-    <div className={`text-xs italic px-3 py-1 ${cls}`}>{label}</div>
+    <div className={`voiceline-ribbon ${kind} active`}>
+      <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none">
+        <path d={`M ${points.join(" L ")}`} strokeWidth="1" />
+      </svg>
+    </div>
+  );
+}
+
+function HeroCall({
+  call,
+  code,
+  messages,
+  now,
+}: {
+  call: Call;
+  code: string;
+  messages: Message[];
+  now: number;
+}) {
+  const [showAll, setShowAll] = useState(false);
+  const fields = fnolDraftFields(call);
+  const visible = showAll ? fields : fields.slice(0, 5);
+  const filledCount = fields.filter((f) => f.value).length;
+  const status = statusOf(call);
+
+  return (
+    <section
+      className="glass"
+      style={{
+        padding: 40,
+        display: "flex",
+        flexDirection: "column",
+        gap: 36,
+      }}
+    >
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          gap: 32,
+        }}
+      >
+        <div style={{ minWidth: 0 }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 10,
+              marginBottom: 18,
+            }}
+          >
+            <span
+              className={`dot ${status.kind === "live" ? "dot-live" : "dot-ended"}`}
+            />
+            <span
+              className={`status-text ${status.kind === "live" ? "status-text-live" : ""}`}
+            >
+              {status.label} · {elapsedLabel(call, now)}
+            </span>
+            <span className="meta-label" style={{ marginLeft: 6 }}>
+              {code}
+            </span>
+          </div>
+          <h2
+            className="display"
+            style={{ fontSize: 44, marginBottom: 8 }}
+          >
+            {callerDisplayName(call)}
+          </h2>
+          <p
+            style={{
+              color: "var(--text-secondary)",
+              fontSize: 15,
+              margin: 0,
+              letterSpacing: "-0.005em",
+            }}
+          >
+            {incidentTypeLabel(call)} — {locationDetail(call)}
+          </p>
+        </div>
+        <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
+          <button className="btn btn-secondary" disabled>Whisper</button>
+          <button className="btn btn-primary" disabled>Take over →</button>
+        </div>
+      </div>
+
+      <div
+        className="voiceline"
+        style={{
+          height: 88,
+          background: "rgba(255,248,240,0.02)",
+          border: "1px solid var(--hairline)",
+          position: "relative",
+        }}
+      >
+        <VoiceRibbon kind="agent" />
+        <VoiceRibbon kind="caller" amp={9} freq={0.018} />
+        <div
+          style={{
+            position: "absolute",
+            inset: "auto 16px 10px 16px",
+            display: "flex",
+            justifyContent: "space-between",
+          }}
+        >
+          <span className="meta-label">Agent</span>
+          <span className="meta-label">Caller</span>
+        </div>
+      </div>
+
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1.4fr 1fr",
+          gap: 40,
+        }}
+      >
+        <div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "baseline",
+              marginBottom: 14,
+            }}
+          >
+            <h3 className="section-title">Live transcript</h3>
+            <span className="meta-label">{messages.length} turns</span>
+          </div>
+          <div style={{ maxHeight: 360, overflow: "auto" }}>
+            {messages.length === 0 && (
+              <div
+                style={{
+                  color: "var(--text-tertiary)",
+                  fontSize: 13,
+                  fontStyle: "italic",
+                  padding: "12px 0",
+                }}
+              >
+                Waiting for first turn…
+              </div>
+            )}
+            {messages.map((m) => (
+              <TranscriptLine key={m.id} m={m} startedAt={call.started_at} />
+            ))}
+          </div>
+        </div>
+
+        <div>
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              alignItems: "baseline",
+              marginBottom: 14,
+            }}
+          >
+            <h3 className="section-title">Claim draft</h3>
+            <span className="meta-label">
+              {filledCount} of {fields.length} captured · {fnolPercent(call)}%
+            </span>
+          </div>
+          <div>
+            {visible.map((f, i) => (
+              <div key={i} className="fnol-row">
+                <span className="fnol-label">{f.label}</span>
+                <span
+                  className={`fnol-value ${f.value ? "" : "is-pending"}`}
+                >
+                  {f.value || "Pending"}
+                </span>
+              </div>
+            ))}
+          </div>
+          <button
+            className="show-more"
+            onClick={() => setShowAll((s) => !s)}
+          >
+            {showAll ? "Show less" : "Show full draft  →"}
+          </button>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function TranscriptLine({
+  m,
+  startedAt,
+}: {
+  m: Message;
+  startedAt: string;
+}) {
+  const offsetSec = Math.max(
+    0,
+    Math.floor((Date.parse(m.timestamp) - Date.parse(startedAt)) / 1000),
+  );
+  const mm = Math.floor(offsetSec / 60);
+  const ss = String(offsetSec % 60).padStart(2, "0");
+  return (
+    <div className="transcript-line">
+      <div className="transcript-meta">
+        <span>{m.role === "agent" ? "Agent" : "Caller"}</span>
+        <span style={{ color: "var(--text-quaternary)" }}>
+          {`${mm}:${ss}`}
+        </span>
+        {m.source && <span>{m.source}</span>}
+      </div>
+      <div
+        className={`transcript-text ${m.role === "caller" ? "is-caller" : ""}`}
+      >
+        {m.text}
+      </div>
+    </div>
   );
 }

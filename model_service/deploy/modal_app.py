@@ -131,15 +131,24 @@ plates in the system.
 Do NOT skip read-back even if you're confident you heard correctly. This is \
 standard claims procedure and protects against transcription errors.
 
-Turn-taking rules:
-- When the caller is mid-sentence, stay silent. Do NOT start a response \
-  until they pause for at least a full second. Interrupting comes across \
-  as bot-like and frustrates callers.
-- When the caller stops, respond promptly — within ~1 second. Long silences \
-  also feel bot-like (caller will think the line dropped).
-- If you genuinely need a moment (e.g. to "look something up"), say so \
-  out loud: "let me check that for you, one moment" — silence without \
-  acknowledgement feels broken.
+Turn-taking rules — listening is your default state:
+- When the caller is speaking (even if they pause briefly to think), STAY \
+  SILENT. Do NOT respond until you're confident they've finished what they \
+  wanted to say. Real claims callers often think mid-sentence. Cutting them \
+  off is the #1 thing they complain about.
+- After the caller finishes a turn, give them ONE more beat to add anything \
+  before you respond. Brief silence is fine — it shows you're listening.
+- LISTEN to the actual words the caller said. Address what they said, don't \
+  jump to the next form field. If the caller asks you a question, ANSWER it \
+  before moving on with your own questions.
+- NEVER guess or invent identifiers (policy numbers, plate numbers, names, \
+  times, addresses). If the caller hasn't given you a value, ASK for it — \
+  don't fill it in with a placeholder. Reading back a fabricated value is \
+  worse than asking again.
+- If the caller says something off-topic ("how are you", small talk), \
+  briefly acknowledge it like a human would, then gently redirect: "I'm \
+  doing well, thanks. Now, can you tell me what happened?". Don't ignore \
+  small talk and don't get stuck in it either.
 
 Things you NEVER ask:
 - Bank details. We never take those by phone.
@@ -329,7 +338,19 @@ class PersonaPlexService:
         import torch
 
         t0 = time.perf_counter()
-        # Drop old refs so GC + empty_cache can release.
+
+        # 1. Reset the underlying LM's streaming state. The LMGen wrapper
+        #    is what we recreate, but the model `self._lm` (which we keep
+        #    in GPU memory across rebuilds — that's what avoids reloading
+        #    14GB of weights) has its OWN nested streaming state. The
+        #    transformer's KV cache lives on lm.transformer._streaming_state,
+        #    NOT on lm_gen. Dropping lm_gen alone leaves ~20GB pinned.
+        try:
+            self._lm.reset_streaming()
+        except Exception:
+            pass
+
+        # 2. Drop old refs so GC + empty_cache can release.
         self.lm_gen = None
         self.mimi = None
         self.other_mimi = None
@@ -337,9 +358,10 @@ class PersonaPlexService:
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 
-        # Rebuild fresh wrappers around the same loaded weights.
+        # 3. Rebuild fresh wrappers around the same loaded weights.
         self._build_inference_stack()
         torch.cuda.synchronize()
+        torch.cuda.empty_cache()
         return time.perf_counter() - t0
 
     @modal.enter()
@@ -995,12 +1017,16 @@ class PersonaPlexService:
                                 )
                             except websockets.exceptions.ConnectionClosed:
                                 pass
-                            # Wake-up nudge — only if no backend directive
-                            # is already mid-flight, so we don't clobber a
-                            # planned interruption from the gate.
+                            # Wake-up nudge: ONLY if no directive is in
+                            # flight AND Sarah hasn't been speaking
+                            # recently (no agent text in the buffer).
+                            # Without that second check we EPAD even when
+                            # Sarah just finished a sentence and was about
+                            # to naturally pause — making her too eager.
                             if (
                                 not drip.queue
                                 and drip.silent_frames_remaining == 0
+                                and not agent_text_buf.strip()
                             ):
                                 drip.queue.append(EPAD_TOKEN_ID)
 
@@ -1041,6 +1067,23 @@ class PersonaPlexService:
                             # buffer to grow unbounded → OOM at ~3min.
                             agent_pcm_t = self.other_mimi.decode(tokens[:, 1:9])
                             agent_pcm_np = agent_pcm_t.detach().cpu().numpy()[0, 0]
+
+                            # Server-side audio gating: when the caller is
+                            # actively speaking AND no backend directive is
+                            # in flight, MUTE Sarah's audio frame. Forcing
+                            # the text token to PAD doesn't silence the
+                            # audio head (text + audio are separate heads
+                            # in PersonaPlex), so without this Sarah talks
+                            # over the caller and they get pissed off.
+                            # If a directive IS in flight (drip queue had
+                            # items), we let Sarah's audio through — the
+                            # backend explicitly wants her to speak now.
+                            if (
+                                vad.is_speaking
+                                and not drip.queue
+                                and drip.silent_frames_remaining == 0
+                            ):
+                                agent_pcm_np = np.zeros_like(agent_pcm_np)
 
                             # Push to LiveKit as int16 PCM
                             agent_int16 = _float32_to_int16(agent_pcm_np)
@@ -1447,11 +1490,10 @@ PAD_TOKEN_ID = 3
 # if extractor fires too eagerly mid-thought.
 RMS_SILENCE_THRESHOLD = 0.005       # below this is "silent"
 SILENCE_FRAMES_FOR_BOUNDARY = 10    # 10 × 80ms = 800ms
-# Brief caller acknowledgments ("okay", "yeah") last ~200-300ms. If we
-# treat 160ms (2 frames) as "caller is speaking", we end up suppressing
-# Sarah mid-readback every time the caller mumbles agreement. 4 frames
-# (320ms) is past most short ack words but still catches real turns.
-SPEECH_FRAMES_FOR_TURN_START = 4
+# How quickly we register caller is speaking. Lower = Sarah pauses faster.
+# Was 4 (320ms) which let Sarah talk over caller; back to 2 (160ms) so
+# even short responses make Sarah shut up.
+SPEECH_FRAMES_FOR_TURN_START = 2
 
 
 class TurnBoundaryDetector:
