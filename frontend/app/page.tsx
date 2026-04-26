@@ -12,7 +12,10 @@ import {
   groupTranscriptBubbles,
   incidentTypeLabel,
   locationDetail,
+  parseFnolInput,
+  setByPath,
   statusOf,
+  type FnolField,
   type TranscriptBubble,
 } from "@/lib/derive";
 import {
@@ -658,14 +661,7 @@ function HeroCall({
           </div>
           <div>
             {visible.map((f, i) => (
-              <div key={i} className="fnol-row">
-                <span className="fnol-label">{f.label}</span>
-                <span
-                  className={`fnol-value ${f.value ? "" : "is-pending"}`}
-                >
-                  {f.value || "Pending"}
-                </span>
-              </div>
+              <EditableFnolRow key={i} call={call} field={f} />
             ))}
           </div>
           <button
@@ -675,6 +671,19 @@ function HeroCall({
             {showAll ? "Show less" : "Show full draft  →"}
           </button>
         </div>
+      </div>
+      <div className="hero-footer">
+        <button
+          className="btn btn-primary"
+          onClick={() => {
+            // TODO: wire up to a backend follow-up endpoint (email/SMS recap
+            // to the caller). For now this is a UI placeholder so the demo
+            // shows the affordance.
+            alert("Follow-up flow not yet wired up.");
+          }}
+        >
+          Send follow-up
+        </button>
       </div>
     </section>
   );
@@ -882,6 +891,117 @@ function SettingsTable({
           <span className="vault-table-desc">{r.desc}</span>
         </div>
       ))}
+    </div>
+  );
+}
+
+// ───────────────────────────────────────────────────────────────────
+// EditableFnolRow — click to edit a claim-draft field inline.
+// Writes back to calls.fnol via Supabase (requires anon UPDATE policy
+// added in db/supabase_schema.sql; re-apply the schema after pull).
+// Realtime subscription will reflect the change in all connected clients.
+// ───────────────────────────────────────────────────────────────────
+
+function EditableFnolRow({ call, field }: { call: Call; field: FnolField }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(field.value ?? "");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Reset draft when field value changes externally (e.g., realtime update
+  // from another client OR from the live call's extractor).
+  useEffect(() => {
+    if (!editing) setDraft(field.value ?? "");
+  }, [field.value, editing]);
+
+  const startEdit = () => {
+    setDraft(field.value ?? "");
+    setError(null);
+    setEditing(true);
+  };
+
+  const cancel = () => {
+    setEditing(false);
+    setDraft(field.value ?? "");
+    setError(null);
+  };
+
+  const commit = async () => {
+    if (saving) return;
+    const parsed = parseFnolInput(field.kind, draft);
+    const currentParsed = parseFnolInput(field.kind, field.value ?? "");
+    // No-op if unchanged
+    if (parsed === currentParsed || (parsed === null && (field.value ?? "") === "")) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      // Patch the in-memory fnol then write the whole jsonb back.
+      const nextFnol = setByPath(
+        (call.fnol ?? {}) as Record<string, unknown>,
+        field.slotPath,
+        parsed,
+      );
+      const { error: dbError } = await supabase()
+        .from("calls")
+        .update({ fnol: nextFnol })
+        .eq("id", call.id);
+      if (dbError) throw dbError;
+      setEditing(false);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setError(msg);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      commit();
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      cancel();
+    }
+  };
+
+  return (
+    <div className="fnol-row">
+      <span className="fnol-label">{field.label}</span>
+      {editing ? (
+        <div className="fnol-edit">
+          <input
+            className="fnol-input"
+            autoFocus
+            value={draft}
+            disabled={saving}
+            onChange={(e) => setDraft(e.target.value)}
+            onBlur={commit}
+            onKeyDown={onKeyDown}
+            placeholder={field.kind === "boolean" ? "yes / no" : "type a value"}
+          />
+          {error && <span className="fnol-error" title={error}>!</span>}
+        </div>
+      ) : (
+        <span
+          className={`fnol-value editable ${field.value ? "" : "is-pending"}`}
+          onClick={startEdit}
+          role="button"
+          tabIndex={0}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" || e.key === " ") {
+              e.preventDefault();
+              startEdit();
+            }
+          }}
+          title="Click to edit"
+        >
+          {field.value || "Pending"}
+        </span>
+      )}
     </div>
   );
 }

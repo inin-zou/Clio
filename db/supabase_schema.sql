@@ -68,3 +68,11 @@ drop policy if exists "anon read events"   on events;
 create policy "anon read calls"    on calls    for select using (true);
 create policy "anon read messages" on messages for select using (true);
 create policy "anon read events"   on events   for select using (true);
+
+-- Operator inline-edit on the Claim Draft pane writes back to calls.fnol
+-- via the anon key. This permits ANY anon user to update any call row.
+-- Acceptable for the hackathon's already-public read posture (anyone with
+-- the anon key can already read every call). Replace with auth-scoped
+-- policies before any non-demo use.
+drop policy if exists "anon update calls" on calls;
+create policy "anon update calls" on calls for update using (true) with check (true);

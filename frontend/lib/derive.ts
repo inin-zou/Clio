@@ -135,8 +135,22 @@ export function statusOf(c: Call): { kind: "live" | "review" | "ended"; label: s
 /**
  * The 10 fields the design's "Claim draft" pane renders. Each pulls from
  * a slot path; missing → null (renders as "Pending").
+ *
+ * `slotPath` and `kind` are used by the inline editor to write back into
+ * the calls.fnol jsonb. `kind` drives input parsing on save:
+ *   - string:   raw text
+ *   - boolean:  "yes"/"y"/"true" → true, "no"/"n"/"false" → false
+ *   - datetime: ISO string passed through
  */
-export type FnolField = { label: string; value: string | null; required: boolean };
+export type FnolFieldKind = "string" | "boolean" | "datetime";
+
+export type FnolField = {
+  label: string;
+  value: string | null;
+  required: boolean;
+  slotPath: string;
+  kind: FnolFieldKind;
+};
 
 export function fnolDraftFields(c: Call): FnolField[] {
   const get = (path: string): string | null => {
@@ -149,19 +163,59 @@ export function fnolDraftFields(c: Call): FnolField[] {
     if (Array.isArray(v)) return v.length ? v.join(", ") : null;
     return JSON.stringify(v);
   };
-
+  const incidentLabel = incidentTypeLabel(c);
   return [
-    { label: "Caller",           value: callerName(c),                   required: true },
-    { label: "Policy",           value: get("policy_number"),            required: true },
-    { label: "Incident",         value: incidentTypeLabel(c) === "Inbound claim" ? null : incidentTypeLabel(c), required: true },
-    { label: "Time",             value: get("incident_datetime"),        required: true },
-    { label: "Location",         value: get("location.full_address"),    required: true },
-    { label: "Vehicle plate",    value: get("license_plate"),            required: true },
-    { label: "Damage",           value: get("description"),              required: true },
-    { label: "Third party",      value: get("other_party_involved"),     required: true },
-    { label: "Injuries",         value: get("any_injuries"),             required: true },
-    { label: "Police report",    value: get("police_case_number"),       required: false },
+    { label: "Caller",        value: callerName(c),                      required: true,  slotPath: "reporter_name",         kind: "string"   },
+    { label: "Policy",        value: get("policy_number"),               required: true,  slotPath: "policy_number",         kind: "string"   },
+    { label: "Incident",      value: incidentLabel === "Inbound claim" ? null : incidentLabel, required: true, slotPath: "incident_type", kind: "string" },
+    { label: "Time",          value: get("incident_datetime"),           required: true,  slotPath: "incident_datetime",     kind: "datetime" },
+    { label: "Location",      value: get("location.full_address"),       required: true,  slotPath: "location.full_address", kind: "string"   },
+    { label: "Vehicle plate", value: get("license_plate"),               required: true,  slotPath: "license_plate",         kind: "string"   },
+    { label: "Damage",        value: get("description"),                 required: true,  slotPath: "description",           kind: "string"   },
+    { label: "Third party",   value: get("other_party_involved"),        required: true,  slotPath: "other_party_involved",  kind: "string"   },
+    { label: "Injuries",      value: get("any_injuries"),                required: true,  slotPath: "any_injuries",          kind: "boolean"  },
+    { label: "Police report", value: get("police_case_number"),          required: false, slotPath: "police_case_number",    kind: "string"   },
   ];
+}
+
+/** Set a value at a dotted path on a jsonb-shaped object. Returns a new
+ *  object (does not mutate). Creates intermediate objects as needed.
+ *  Used by the inline editor to patch calls.fnol. */
+export function setByPath<T extends Record<string, unknown>>(
+  obj: T,
+  path: string,
+  value: unknown,
+): T {
+  const parts = path.split(".");
+  // Shallow-clone the spine so React sees a new reference at every level
+  const root: Record<string, unknown> = { ...(obj || {}) };
+  let cur: Record<string, unknown> = root;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const k = parts[i];
+    const child = cur[k];
+    cur[k] = (typeof child === "object" && child !== null && !Array.isArray(child))
+      ? { ...(child as Record<string, unknown>) }
+      : {};
+    cur = cur[k] as Record<string, unknown>;
+  }
+  cur[parts[parts.length - 1]] = value;
+  return root as T;
+}
+
+/** Parse user-typed input back into the right primitive based on field kind.
+ *  Returns null if the input is empty (clears the slot). */
+export function parseFnolInput(kind: FnolFieldKind, raw: string): unknown {
+  const trimmed = raw.trim();
+  if (trimmed === "") return null;
+  if (kind === "boolean") {
+    const lower = trimmed.toLowerCase();
+    if (["yes", "y", "true", "1"].includes(lower)) return true;
+    if (["no", "n", "false", "0"].includes(lower)) return false;
+    return trimmed;  // unknown — store as-is so we don't silently drop info
+  }
+  // datetime + string both pass through; backend has no strict validation
+  // on the calls.fnol jsonb so this is safe.
+  return trimmed;
 }
 
 // ─── Transcript bubble grouping ──────────────────────────────────────
