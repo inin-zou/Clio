@@ -123,6 +123,26 @@ enum value.
 "2026-04-25T08:30:00+02:00"). Use the "Current time" provided in the user \
 message to resolve relative references.
 
+10. STRICT ANCHOR for identifier-shaped slots (policy_number, license_plate, \
+vin, claim_number, police_case_number, *_phone). For these slots you MUST \
+have a clear caller statement that explicitly assigns the value. Acceptable \
+patterns include:
+  - "my policy number is X" / "the plate is X" / "VIN is X"
+  - "X" said as a direct answer to Sarah asking for that specific identifier \
+    (Sarah's preceding turn must contain the slot name or an unambiguous \
+    pronoun referring to it)
+  - Caller correcting a read-back: "no, it's X"
+
+Do NOT extract these slots from:
+  - Bare digits or letter sequences that drift through the transcript ("43", \
+    "what?", "okay") — even if the type matches the field's shape
+  - Sarah reading back a value she heard earlier (her read-back is NOT a \
+    new caller statement)
+  - Cross-talk, fragments, or filler that contains digits incidentally
+
+If you're not certain the caller explicitly stated the value, OMIT the slot. \
+A missing slot is recoverable; a wrong policy_number / license_plate is not.
+
 Return a JSON object containing only the fields that should be UPDATED, plus \
 a `reasoning` field explaining your decisions briefly.
 """

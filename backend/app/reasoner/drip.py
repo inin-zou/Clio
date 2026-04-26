@@ -217,9 +217,40 @@ def render_readback(slot_label: str, value: str) -> str:
     function is the deterministic fallback used by the gate when we want to
     *force* a read-back on a critical entity that the slot extractor flagged
     with low confidence.
+
+    Different slot families need different rendering:
+      - IDs (policy_number, license_plate, VIN, claim_number) → spell
+        character-by-character so the caller can verify each digit/letter
+      - Phone / email → spell similarly (digits, @, dots)
+      - Datetime → natural English ("5 a.m. on April 26th"), NOT
+        character-by-character ISO ("2 0 2 6 dash 0 4 dash 2 6 ...")
+      - Names, addresses, free text → speak naturally, no spelling
     """
-    spaced = _spell_for_voice(value)
-    return f"Okay so that's {spaced}, is that right?"
+    if _is_datetime_slot(slot_label):
+        return f"Okay, just to confirm — that's {_render_datetime(value)}, is that right?"
+    if _is_id_slot(slot_label):
+        return f"Okay so that's {_spell_for_voice(value)}, is that right?"
+    # Default: read back as plain text without spelling.
+    return f"Okay so that's {value}, is that right?"
+
+
+def _is_datetime_slot(slot_label: str) -> bool:
+    return (
+        slot_label.endswith("_datetime")
+        or slot_label.endswith("_at")
+        or slot_label.endswith("_date")
+        or slot_label.endswith("_time")
+    )
+
+
+def _is_id_slot(slot_label: str) -> bool:
+    return slot_label in {
+        "policy_number",
+        "license_plate",
+        "vin",
+        "claim_number",
+        "police_case_number",
+    } or slot_label.endswith("_phone") or slot_label.endswith("_number")
 
 
 def _spell_for_voice(value: str) -> str:
@@ -237,6 +268,64 @@ def _spell_for_voice(value: str) -> str:
         else:
             out.append(ch.upper())
     return " ".join(out)
+
+
+# ─── Datetime rendering ──────────────────────────────────────────────────────
+
+_BERLIN_TZ_NAME = "Europe/Berlin"
+
+
+def _render_datetime(value: str) -> str:
+    """Render an ISO datetime in spoken English aligned to Berlin local time.
+
+    '2026-04-26T05:00:00+00:00' → '5 a.m. on April 26th'
+    '2026-04-26T17:30:00Z'      → '7:30 p.m. on April 26th' (Berlin = UTC+2 in DST)
+
+    Falls back to the input string if parsing fails.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        # Tolerate trailing Z (Python <3.11 compat plus some inputs).
+        iso = value.replace("Z", "+00:00")
+        dt = datetime.fromisoformat(iso)
+        if dt.tzinfo is None:
+            # Treat naive as Berlin local — orchestrator usually emits UTC,
+            # but be defensive.
+            dt = dt.replace(tzinfo=ZoneInfo(_BERLIN_TZ_NAME))
+        else:
+            dt = dt.astimezone(ZoneInfo(_BERLIN_TZ_NAME))
+    except (ValueError, TypeError, ImportError):
+        return value
+
+    return f"{_clock_phrase(dt)} on {_date_phrase(dt)}"
+
+
+def _clock_phrase(dt: datetime) -> str:
+    h, m = dt.hour, dt.minute
+    if h == 0:
+        return "midnight" if m == 0 else f"12:{m:02d} a.m."
+    if h == 12:
+        return "noon" if m == 0 else f"12:{m:02d} p.m."
+    if h < 12:
+        return f"{h} a.m." if m == 0 else f"{h}:{m:02d} a.m."
+    h12 = h - 12
+    return f"{h12} p.m." if m == 0 else f"{h12}:{m:02d} p.m."
+
+
+def _date_phrase(dt: datetime) -> str:
+    """'April 26th'. Ordinal suffix to feel natural in spoken form."""
+    day = dt.day
+    if 11 <= day <= 13:
+        suffix = "th"
+    elif day % 10 == 1:
+        suffix = "st"
+    elif day % 10 == 2:
+        suffix = "nd"
+    elif day % 10 == 3:
+        suffix = "rd"
+    else:
+        suffix = "th"
+    return f"{dt.strftime('%B')} {day}{suffix}"
 
 
 # ─── Smoke test ─────────────────────────────────────────────────────────────

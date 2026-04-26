@@ -97,6 +97,13 @@ class CallOrchestrator:
         self._closed = False
         self._cold_start_started_at: datetime | None = None
 
+        # Backend-side ReadbackOutcome detection. When the gate forces a
+        # read-back, we record (slot_path, value) here. The next caller
+        # transcript is pattern-matched against confirm/correct phrases;
+        # on a match we synthesize a ReadbackEvent locally so the gate's
+        # confirmed_slots() updates and it stops re-firing.
+        self._pending_readback: dict | None = None
+
     # ─── Setup / teardown ────────────────────────────────────────────────
 
     async def send_session_start(self) -> None:
@@ -212,6 +219,51 @@ class CallOrchestrator:
             source=msg.source,
             timestamp=msg.timestamp,
         )
+
+        # If we forced a read-back recently and this is the caller's
+        # response, try to match it against confirm/correct/unclear and
+        # synthesize a ReadbackEvent locally. Without this loop the gate
+        # never sees the slot as confirmed and re-fires until it gives up.
+        if (
+            msg.role == "caller"
+            and msg.source == "scribe"  # Scribe transcripts are the clean signal
+            and self._pending_readback is not None
+        ):
+            outcome = _classify_readback_response(msg.text)
+            if outcome is not None:
+                pending = self._pending_readback
+                self._pending_readback = None
+                event = ReadbackEvent(
+                    slot_path=pending["slot_path"],
+                    proposed_value=pending["value"],
+                    caller_response=outcome["response"],
+                    final_value=outcome["final_value"] or pending["value"],
+                    timestamp=msg.timestamp,
+                    attempt=self.reasoner_session.attempts_for_slot(
+                        pending["slot_path"]
+                    ) + 1,
+                )
+                self.reasoner_session.record_readback(event)
+                logger.info(
+                    "call %s: auto-detected readback %s = %r (%s)",
+                    self.call_id,
+                    event.slot_path,
+                    event.final_value,
+                    event.caller_response,
+                )
+                # Mirror to event bus + supabase so UI sees confirmation
+                payload = event.model_dump(mode="json")
+                EVENT_BUS.publish(self.call_id, {
+                    "type": "readback",
+                    **payload,
+                })
+                await asyncio.to_thread(
+                    supabase_writer.insert_event,
+                    self.call_id,
+                    type="readback",
+                    payload=payload,
+                    timestamp=msg.timestamp,
+                )
         EVENT_BUS.publish(self.call_id, {
             "type": "transcript",
             "role": msg.role,
@@ -348,6 +400,27 @@ class CallOrchestrator:
                 logger.info("call %s: gate fires %s — %s", self.call_id,
                             directive.type, directive.reason)
                 await self._send(directive)
+
+                # If the gate fired a read-back, remember which slot is
+                # awaiting confirmation so the next caller transcript can
+                # be pattern-matched and turned into a ReadbackEvent.
+                if "forced readback" in directive.reason:
+                    slot_path = _slot_from_readback_reason(directive.reason)
+                    if slot_path:
+                        value = _resolve_path(
+                            session.session.report.model_dump(mode="json"),
+                            slot_path,
+                        )
+                        self._pending_readback = {
+                            "slot_path": slot_path,
+                            "value": str(value) if value is not None else "",
+                            "issued_at": now,
+                        }
+                        logger.debug(
+                            "call %s: awaiting confirmation for %s = %r",
+                            self.call_id, slot_path, value,
+                        )
+
                 gate_payload = {
                     "directive_type": directive.type,
                     "reason": directive.reason,
@@ -426,3 +499,73 @@ def _resolve_path(report_dump: dict, path: str) -> Any:
         if cursor is None:
             return None
     return cursor
+
+
+# ─── Readback auto-detection helpers ─────────────────────────────────────
+
+
+import re
+
+# Reasons emitted by gate.py look like:
+#   "forced readback (attempt 1/3): policy_number unconfirmed"
+_READBACK_REASON_RE = re.compile(r"forced readback[^:]*:\s*([\w.]+)\s+unconfirmed")
+
+
+def _slot_from_readback_reason(reason: str) -> str | None:
+    m = _READBACK_REASON_RE.search(reason)
+    return m.group(1) if m else None
+
+
+# Phrase patterns the caller might use after a read-back. Order matters: we
+# check correction first because "no actually" should NOT trigger confirm.
+_CORRECT_PATTERNS = (
+    r"\bno\b",
+    r"\bnope\b",
+    r"\bwrong\b",
+    r"\bactually\b",
+    r"\bi meant\b",
+    r"\bit's\b",
+    r"\bit is\b",
+    r"\bcorrect.{0,5}me\b",
+)
+_CONFIRM_PATTERNS = (
+    r"\byes\b",
+    r"\byeah\b",
+    r"\byep\b",
+    r"\byup\b",
+    r"\bthat'?s right\b",
+    r"\bthat'?s correct\b",
+    r"\bcorrect\b",
+    r"\bright\b",
+    r"\bexactly\b",
+    r"\bperfect\b",
+    r"\bgood\b",
+    r"\baffirmative\b",
+    r"\bmm-?hm+\b",
+)
+
+
+def _classify_readback_response(text: str) -> dict | None:
+    """Classify a caller utterance as confirm / correct / unclear.
+
+    Returns None if the text doesn't look like a response to a read-back at
+    all (so we don't accidentally lock in a non-confirmation as confirmed).
+    """
+    if not text:
+        return None
+    t = text.lower().strip()
+
+    correcting = any(re.search(p, t) for p in _CORRECT_PATTERNS)
+    confirming = any(re.search(p, t) for p in _CONFIRM_PATTERNS)
+
+    if correcting and not confirming:
+        # Try to extract the corrected value — best-effort, falls back to
+        # full text. Better correction parsing is a future improvement.
+        return {"response": "corrected", "final_value": text.strip()}
+    if confirming and not correcting:
+        return {"response": "confirmed", "final_value": None}
+    if confirming and correcting:
+        # Mixed signal ("no, that's right"?) — ambiguous
+        return {"response": "unclear", "final_value": None}
+    # No clear signal; don't classify.
+    return None

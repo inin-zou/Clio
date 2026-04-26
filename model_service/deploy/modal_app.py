@@ -120,8 +120,26 @@ If the caller corrects you, acknowledge it briefly:
   Caller: "No, it's 002 not 001."
   Sarah:  "Ah okay, P-O-L dash 2-0-2-4 dash 0-0-2. Thanks for clarifying."
 
+After you read something back, STOP TALKING and wait for the caller to \
+explicitly confirm ("yes", "right", "correct", "that's it") or correct you. \
+Do NOT ask the next question, change topic, or continue with anything else \
+until the caller has confirmed the value. A silent pause after a read-back \
+is the caller thinking — give them the beat. Asking a follow-up question \
+before they confirm is the #1 way to end up with wrong policy numbers and \
+plates in the system.
+
 Do NOT skip read-back even if you're confident you heard correctly. This is \
 standard claims procedure and protects against transcription errors.
+
+Turn-taking rules:
+- When the caller is mid-sentence, stay silent. Do NOT start a response \
+  until they pause for at least a full second. Interrupting comes across \
+  as bot-like and frustrates callers.
+- When the caller stops, respond promptly — within ~1 second. Long silences \
+  also feel bot-like (caller will think the line dropped).
+- If you genuinely need a moment (e.g. to "look something up"), say so \
+  out loud: "let me check that for you, one moment" — silence without \
+  acknowledgement feels broken.
 
 Things you NEVER ask:
 - Bank details. We never take those by phone.
@@ -235,6 +253,86 @@ class PersonaPlexService:
     frame_size: int = 0
     voices_dir: str = ""
 
+    # Refs needed to rebuild the streaming wrappers per call without
+    # reloading the model weights from disk.
+    _mimi_weight_path: str = ""
+    _lm: object = None
+    _device: str = "cuda"
+
+    def _build_inference_stack(self, *, warmup_iters: int = 2) -> None:
+        """(Re)create lm_gen + mimi + other_mimi as fresh wrappers around
+        the already-loaded model weights, then enable streaming_forever
+        and run a minimal warmup so the streaming-state field pattern
+        matches the snapshot taken at end of setup.
+
+        Called once at end of setup() and again in process_call's finally
+        block to drop CUDA graphs that PyTorch's allocator can't release
+        otherwise (the per-call leak was ~25 GB after a 3min call).
+        """
+        import torch
+        from moshi.models import LMGen, loaders
+
+        device = self._device
+        self.mimi = loaders.get_mimi(self._mimi_weight_path, device)
+        self.other_mimi = loaders.get_mimi(self._mimi_weight_path, device)
+        self.lm_gen = LMGen(
+            self._lm,
+            audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),
+            sample_rate=self.mimi.sample_rate,
+            device=device,
+            frame_rate=self.mimi.frame_rate,
+            use_sampling=True,
+            temp=0.8,
+            temp_text=0.7,
+            top_k=250,
+            top_k_text=25,
+        )
+        self.mimi.streaming_forever(1)
+        self.other_mimi.streaming_forever(1)
+        self.lm_gen.streaming_forever(1)
+
+        # Warmup so lazy-init streaming state fields are populated, giving
+        # set_streaming_state_inplace a consistent field pattern to copy
+        # the snapshot tensors into.
+        for _ in range(warmup_iters):
+            chunk = torch.zeros(
+                1, 1, self.frame_size, dtype=torch.float32, device=device
+            )
+            codes = self.mimi.encode(chunk)
+            _ = self.other_mimi.encode(chunk)
+            for c in range(codes.shape[-1]):
+                tokens = self.lm_gen.step(codes[:, :, c : c + 1])
+                if tokens is None:
+                    continue
+                _ = self.mimi.decode(tokens[:, 1:9])
+                _ = self.other_mimi.decode(tokens[:, 1:9])
+        torch.cuda.synchronize()
+
+    def _recreate_inference_stack(self) -> float:
+        """Drop the current lm_gen + mimi instances and rebuild fresh
+        ones. Releases CUDA-graph-pinned memory the prior call leaked.
+
+        Run from a thread (asyncio.to_thread) since it's blocking GPU
+        work. Returns elapsed seconds for telemetry.
+        """
+        import gc
+
+        import torch
+
+        t0 = time.perf_counter()
+        # Drop old refs so GC + empty_cache can release.
+        self.lm_gen = None
+        self.mimi = None
+        self.other_mimi = None
+        gc.collect()
+        torch.cuda.synchronize()
+        torch.cuda.empty_cache()
+
+        # Rebuild fresh wrappers around the same loaded weights.
+        self._build_inference_stack()
+        torch.cuda.synchronize()
+        return time.perf_counter() - t0
+
     @modal.enter()
     def setup(self) -> None:
         """Load PersonaPlex once per container start.
@@ -306,56 +404,34 @@ class PersonaPlexService:
         lm.eval()
         print(f"[setup]   LM loaded to GPU ({time.perf_counter() - t0:.1f}s)", flush=True)
 
+        # Stash references we'll need to rebuild lm_gen + mimi at end of
+        # each call. The model weights themselves (`lm`) are kept in GPU
+        # memory across rebuilds — only the wrappers + their CUDA graphs
+        # get recreated, which is what frees the per-call leak.
+        self._mimi_weight_path = mimi_weight
+        self._lm = lm
+        self._device = device
+
         # 80 ms = 1920 samples at 24kHz.
         self.frame_size = int(self.mimi.sample_rate / self.mimi.frame_rate)
 
-        print("[setup] constructing LMGen ...", flush=True)
+        print("[setup] constructing LMGen + warmup pass ...", flush=True)
         t0 = time.perf_counter()
-        self.lm_gen = LMGen(
-            lm,
-            audio_silence_frame_cnt=int(0.5 * self.mimi.frame_rate),  # 0.5s spacer
-            sample_rate=self.mimi.sample_rate,
-            device=device,
-            frame_rate=self.mimi.frame_rate,
-            # Match the offline.py CLI defaults — these are reasonable for FNOL voice
-            use_sampling=True,
-            temp=0.8,
-            temp_text=0.7,
-            top_k=250,
-            top_k_text=25,
-        )
-        # Critical: tells the model + codec to maintain streaming KV cache /
-        # state across step() calls. Without this each step starts cold.
-        self.mimi.streaming_forever(1)
-        self.other_mimi.streaming_forever(1)
-        self.lm_gen.streaming_forever(1)
-        print(f"[setup]   LMGen ready ({time.perf_counter() - t0:.1f}s)", flush=True)
+        self._build_inference_stack(warmup_iters=4)
+        print(f"[setup]   LMGen + warmup ready "
+              f"({time.perf_counter() - t0:.1f}s)", flush=True)
 
-        print("[setup] warmup pass (compiles CUDA graphs)...", flush=True)
-        t0 = time.perf_counter()
-        for _ in range(4):
-            chunk = torch.zeros(
-                1, 1, self.frame_size, dtype=torch.float32, device=device
-            )
-            codes = self.mimi.encode(chunk)
-            _ = self.other_mimi.encode(chunk)
-            for c in range(codes.shape[-1]):
-                tokens = self.lm_gen.step(codes[:, :, c : c + 1])
-                if tokens is None:
-                    continue
-                _ = self.mimi.decode(tokens[:, 1:9])
-                _ = self.other_mimi.decode(tokens[:, 1:9])
-        torch.cuda.synchronize()
+        # Warmup pass now lives inside _build_inference_stack so per-call
+        # rebuilds also get it (without warmup, the streaming-state field
+        # pattern wouldn't match what set_streaming_state_inplace expects).
         torch.cuda.empty_cache()
         if torch.cuda.is_available():
             free, total = torch.cuda.mem_get_info()
             print(
-                f"[setup]   warmup done ({time.perf_counter() - t0:.1f}s) "
-                f"— GPU {(total - free) / 1e9:.1f}GB used / {total / 1e9:.1f}GB",
+                f"[setup]   GPU after warmup: {(total - free) / 1e9:.1f}GB "
+                f"used / {total / 1e9:.1f}GB",
                 flush=True,
             )
-        else:
-            print(f"[setup]   warmup done ({time.perf_counter() - t0:.1f}s)", flush=True)
 
         # ─── Voice prompts ──────────────────────────────────────────
         # NVIDIA ships voice prompt embeddings (NATF1.pt etc.) as voices.tgz
@@ -734,10 +810,22 @@ class PersonaPlexService:
                             except asyncio.CancelledError:
                                 raise
                             except Exception as e:
-                                logger.exception(
-                                    "call %s: scribe consumer crashed: %s",
-                                    call_id, e,
-                                )
+                                # ElevenLabs sometimes closes the upstream
+                                # WS at end of call with status 1000 (normal
+                                # closure). The plugin re-raises it as an
+                                # APIStatusError. We don't care — the call
+                                # is ending anyway.
+                                msg = str(e).lower()
+                                if "closed" in msg or "1000" in msg:
+                                    logger.debug(
+                                        "call %s: scribe consumer ended: %s",
+                                        call_id, e,
+                                    )
+                                else:
+                                    logger.exception(
+                                        "call %s: scribe consumer crashed: %s",
+                                        call_id, e,
+                                    )
 
                         scribe_consume_task = asyncio.create_task(_consume_scribe())
                         logger.info("call %s: Scribe STT stream opened", call_id)
@@ -827,12 +915,15 @@ class PersonaPlexService:
                 buffer = np.empty(0, dtype=np.float32)
 
                 # Agent transcript batching. PersonaPlex's text head emits
-                # one token per 80ms frame; sending one transcript event per
-                # token swamps the SSE consumer with noise (every space,
-                # apostrophe, sub-word). We accumulate into ~half-second
-                # phrases and ship those.
-                AGENT_TEXT_FLUSH_SECONDS = 0.5
-                AGENT_TEXT_MAX_BUFFER = 60
+                # one token per 80ms frame. We accumulate and flush at
+                # natural boundaries (sentence end > comma > word boundary
+                # if buffer is long enough) to keep the UI/log readable.
+                # Hard timeout fallback prevents indefinite hold on a
+                # super-long sentence.
+                AGENT_TEXT_HARD_TIMEOUT = 2.5  # seconds
+                AGENT_TEXT_PHRASE_MIN = 30      # min chars to flush on a comma
+                AGENT_TEXT_WORD_MIN = 60        # min chars to flush on word
+                AGENT_TEXT_MAX_BUFFER = 120     # absolute hard flush
                 SKIP_TEXT_TOKENS = {
                     PAD_TOKEN_ID, EPAD_TOKEN_ID, BOS_TOKEN_ID, EOS_TOKEN_ID,
                 }
@@ -877,7 +968,10 @@ class PersonaPlexService:
 
                         # VAD: detect caller turn boundary before encoding.
                         # If True, the caller just finished speaking — push
-                        # event to backend so the slot extractor runs.
+                        # event to backend so the slot extractor runs, AND
+                        # nudge Sarah out of any PAD lock with EPAD so she
+                        # actually responds (without this she sometimes
+                        # stays silent until the caller speaks again).
                         if vad.update(chunk):
                             turn_boundary_count += 1
                             try:
@@ -892,6 +986,14 @@ class PersonaPlexService:
                                 )
                             except websockets.exceptions.ConnectionClosed:
                                 pass
+                            # Wake-up nudge — only if no backend directive
+                            # is already mid-flight, so we don't clobber a
+                            # planned interruption from the gate.
+                            if (
+                                not drip.queue
+                                and drip.silent_frames_remaining == 0
+                            ):
+                                drip.queue.append(EPAD_TOKEN_ID)
 
                         # Mimi.encode wants [B, channels, T] float32 on cuda
                         chunk_t = torch.from_numpy(chunk).to(
@@ -902,6 +1004,14 @@ class PersonaPlexService:
                         # LMGen.step — feed forced text_token from drip state
                         for c in range(user_codes.shape[-1]):
                             forced_id = drip.next_forced_token()
+                            # Talkover suppression: if no directive is active
+                            # AND VAD says the caller is currently speaking,
+                            # force PAD so Sarah waits for them to finish.
+                            # The model's natural duplex behavior is unreliable
+                            # on phone-band audio (different from training
+                            # distribution).
+                            if forced_id is None and vad.is_speaking:
+                                forced_id = PAD_TOKEN_ID
                             forced_tensor = (
                                 torch.tensor([forced_id], device="cuda", dtype=torch.long)
                                 if forced_id is not None
@@ -914,8 +1024,13 @@ class PersonaPlexService:
                             if tokens is None:
                                 continue
 
-                            # Decode agent audio (Mimi codes 1..8 = audio)
-                            agent_pcm_t = self.mimi.decode(tokens[:, 1:9])
+                            # Decode agent audio. Critical: use other_mimi
+                            # (the decoder twin), NOT self.mimi (which is
+                            # the encoder side processing caller audio).
+                            # Sharing one Mimi for both encode + decode
+                            # causes the streaming convolution's prev_x
+                            # buffer to grow unbounded → OOM at ~3min.
+                            agent_pcm_t = self.other_mimi.decode(tokens[:, 1:9])
                             agent_pcm_np = agent_pcm_t.detach().cpu().numpy()[0, 0]
 
                             # Push to LiveKit as int16 PCM
@@ -929,9 +1044,9 @@ class PersonaPlexService:
                             await audio_source.capture_frame(out_frame)
 
                             # Accumulate agent text tokens into a buffer;
-                            # flush as a single transcript event every
-                            # AGENT_TEXT_FLUSH_SECONDS or when the buffer
-                            # gets large. Skip control tokens entirely.
+                            # flush at natural boundaries so the UI/log
+                            # shows complete phrases instead of mid-word
+                            # fragments. Skip control tokens entirely.
                             text_token_id = int(tokens[0, 0, 0].item())
                             if text_token_id not in SKIP_TEXT_TOKENS:
                                 piece = _decode_text_token(
@@ -940,23 +1055,23 @@ class PersonaPlexService:
                                 if piece:
                                     agent_text_buf += piece
 
-                            now_t = time.perf_counter()
-                            should_flush = bool(agent_text_buf) and (
-                                len(agent_text_buf) >= AGENT_TEXT_MAX_BUFFER
-                                or now_t - agent_last_flush
-                                    >= AGENT_TEXT_FLUSH_SECONDS
+                            flush_text = _maybe_flush_agent_buf(
+                                agent_text_buf,
+                                age=time.perf_counter() - agent_last_flush,
                             )
-                            if should_flush:
-                                flush_text = agent_text_buf.strip()
-                                agent_text_buf = ""
-                                agent_last_flush = now_t
-                                if flush_text:
+                            if flush_text is not None:
+                                # Whatever wasn't flushed (partial trailing
+                                # word) stays for the next iteration.
+                                agent_text_buf = agent_text_buf[len(flush_text):]
+                                agent_last_flush = time.perf_counter()
+                                cleaned = flush_text.strip()
+                                if cleaned:
                                     try:
                                         await ws.send(json.dumps({
                                             "type": "transcript",
                                             "call_id": call_id,
                                             "role": "agent",
-                                            "text": flush_text,
+                                            "text": cleaned,
                                             "source": "personaplex",
                                             "timestamp": datetime.now(
                                                 timezone.utc
@@ -983,17 +1098,27 @@ class PersonaPlexService:
                 except asyncio.CancelledError:
                     pass
 
-                # Close Scribe STT stream + consumer + http session
-                if scribe_stream is not None:
-                    try:
-                        await scribe_stream.aclose()
-                    except Exception:
-                        pass
+                # Close Scribe STT stack. Order matters:
+                #   1. Cancel the consumer task (stops iterating stream)
+                #   2. Close the stream (signal end-of-input)
+                #   3. Close the http session (release WS to ElevenLabs)
+                # Reversed order produces "RuntimeError: aclose(): generator
+                # is already running" + "Unclosed client session" warnings.
                 if scribe_consume_task is not None:
                     scribe_consume_task.cancel()
                     try:
                         await scribe_consume_task
-                    except asyncio.CancelledError:
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                if scribe_stream is not None:
+                    try:
+                        # end_input lets the plugin flush any pending audio
+                        # before we close, avoiding the "connection closed
+                        # unexpectedly" log spam.
+                        if hasattr(scribe_stream, "end_input"):
+                            scribe_stream.end_input()
+                        await scribe_stream.aclose()
+                    except Exception:
                         pass
                 if scribe_http_session is not None:
                     try:
@@ -1024,12 +1149,26 @@ class PersonaPlexService:
                     await room.disconnect()
                 except Exception:
                     pass
-            # Release per-call GPU memory back to the caching allocator so
-            # the next call doesn't OOM from cumulative fragmentation.
+            # End-of-call memory reclaim. reset_streaming + empty_cache
+            # didn't actually free anything because CUDAGraphed objects in
+            # _LMGenState pin their captured tensors' memory addresses.
+            # The only path that reliably releases is to drop the entire
+            # lm_gen + mimi instances and rebuild fresh wrappers around
+            # the still-loaded model weights. The next call's start-of-
+            # process_call snapshot restore puts the new instances back
+            # into post-priming state.
             try:
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+                elapsed = await asyncio.to_thread(self._recreate_inference_stack)
+                if torch.cuda.is_available():
+                    free, total = torch.cuda.mem_get_info()
+                    logger.info(
+                        "call %s: post-call rebuild in %.1fs — GPU %.1fGB used / %.1fGB",
+                        call_id, elapsed,
+                        (total - free) / 1e9, total / 1e9,
+                    )
+            except Exception as e:
+                logger.warning("call %s: post-call rebuild failed: %s",
+                               call_id, e)
 
         return {
             "ok": True,
@@ -1226,6 +1365,49 @@ def _float32_to_int16(arr) -> "numpy.ndarray":
 
     clipped = np.clip(arr, -1.0, 1.0)
     return (clipped * 32767.0).astype(np.int16)
+
+
+def _maybe_flush_agent_buf(buf: str, age: float) -> str | None:
+    """Decide what (if anything) of the agent transcript buffer to flush.
+
+    Returns the prefix to flush (caller pops it from buf), or None to wait.
+
+    Flush priority:
+      1. Sentence end (`.`, `?`, `!`)            — flush UP TO and including
+      2. Comma + buffer >= AGENT_TEXT_PHRASE_MIN — flush up to and including
+      3. Word boundary (space) + buf >= AGENT_TEXT_WORD_MIN — flush up to space
+      4. Hard buffer cap (AGENT_TEXT_MAX_BUFFER) — flush whatever's there
+      5. Hard age cap (AGENT_TEXT_HARD_TIMEOUT)  — flush whatever's there
+    """
+    if not buf:
+        return None
+    AGENT_TEXT_HARD_TIMEOUT = 2.5
+    AGENT_TEXT_PHRASE_MIN = 30
+    AGENT_TEXT_WORD_MIN = 60
+    AGENT_TEXT_MAX_BUFFER = 120
+
+    # 1. Sentence-final punctuation
+    for p in (".", "?", "!"):
+        i = buf.rfind(p)
+        if i >= 0:
+            return buf[: i + 1]
+    # 2. Comma at phrase length
+    if len(buf) >= AGENT_TEXT_PHRASE_MIN:
+        i = buf.rfind(",")
+        if i >= 0:
+            return buf[: i + 1]
+    # 3. Word boundary at long-buffer length
+    if len(buf) >= AGENT_TEXT_WORD_MIN:
+        i = buf.rfind(" ")
+        if i > 0:
+            return buf[:i]
+    # 4. Hard cap
+    if len(buf) >= AGENT_TEXT_MAX_BUFFER:
+        return buf
+    # 5. Timeout
+    if age >= AGENT_TEXT_HARD_TIMEOUT:
+        return buf
+    return None
 
 
 def _decode_text_token(tokenizer, token_id: int) -> str:

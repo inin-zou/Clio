@@ -37,8 +37,17 @@ from .state import Session, get_by_path
 # ─── Tunable thresholds ──────────────────────────────────────────────────────
 
 # How many transcript turns can pass after a critical slot is filled before
-# the gate forces a read-back if Sarah hasn't done one herself.
-READBACK_GRACE_TURNS = 2
+# the gate forces a read-back if Sarah hasn't done one herself. Tighter is
+# better for entity accuracy: a 1-turn grace gives Sarah's persona prompt
+# one shot to handle it before we force the issue.
+READBACK_GRACE_TURNS = 1
+
+# How many caller turns can pass after we forced a read-back before we
+# re-fire it (because the caller still hasn't confirmed). Without this we
+# only get one shot per slot and the conversation moves on with unconfirmed
+# entities. Capped so we don't loop forever on a stubbornly-noisy slot.
+READBACK_REFIRE_AFTER_TURNS = 3
+READBACK_MAX_ATTEMPTS = 3
 
 # How many seconds of silence from the caller (no new turns) implies they're
 # wrapping up. If any critical slot is still missing at that point, fire wrap-up.
@@ -79,7 +88,10 @@ DRIFT_ENABLED = False
 @dataclass
 class _GateMemory:
     """Track which slots/triggers we've already fired on, so we don't double-fire."""
-    forced_readbacks: set[str] = field(default_factory=set)
+    # slot_path → {attempts: int, last_attempt_turn_idx: int}.
+    # Lets us re-fire read-back if the caller hasn't confirmed within
+    # READBACK_REFIRE_AFTER_TURNS of caller turns since our last attempt.
+    readback_attempts: dict[str, dict] = field(default_factory=dict)
     fired_compliance: set[str] = field(default_factory=set)
     fired_wrapup: bool = False
 
@@ -182,17 +194,35 @@ class InterventionGate:
         s = session.session  # FNOLSession
 
         # ── 1. Pending read-back ─────────────────────────────────────────
-        # Only fires if Sarah hasn't read it back herself within the grace window.
+        # Fires when an entity-verification slot is filled but unconfirmed.
+        # Re-fires every READBACK_REFIRE_AFTER_TURNS caller turns until
+        # confirmed, capped by READBACK_MAX_ATTEMPTS.
+        caller_turn_idx = sum(1 for t in s.transcript if t.role == "caller")
         for slot_path in _slots_needing_readback(s):
-            if slot_path in self.memory.forced_readbacks:
-                continue  # already nudged this one
-            if _turns_since_slot_filled(s, slot_path) <= READBACK_GRACE_TURNS:
-                continue  # give Sarah's persona prompt a chance to handle it
+            attempts = self.memory.readback_attempts.get(slot_path)
+            if attempts is None:
+                # First time we see this slot unconfirmed.
+                if _turns_since_slot_filled(s, slot_path) <= READBACK_GRACE_TURNS:
+                    continue  # let Sarah's persona prompt try first
+                attempts = {"attempts": 0, "last_attempt_turn_idx": -1}
+            else:
+                if attempts["attempts"] >= READBACK_MAX_ATTEMPTS:
+                    continue  # gave up; downstream wrap-up gate will handle it
+                turns_since_attempt = caller_turn_idx - attempts["last_attempt_turn_idx"]
+                if turns_since_attempt < READBACK_REFIRE_AFTER_TURNS:
+                    continue  # waiting on caller to respond to last attempt
+
             value = get_by_path(s.report, slot_path)
-            self.memory.forced_readbacks.add(slot_path)
+            attempts["attempts"] += 1
+            attempts["last_attempt_turn_idx"] = caller_turn_idx
+            self.memory.readback_attempts[slot_path] = attempts
             return self.builder.speak(
                 text=render_readback(slot_path, str(value)),
-                reason=f"forced readback: {slot_path} unconfirmed after grace window",
+                after_release="silent",  # hold and wait for caller's confirmation
+                reason=(
+                    f"forced readback (attempt {attempts['attempts']}/"
+                    f"{READBACK_MAX_ATTEMPTS}): {slot_path} unconfirmed"
+                ),
             )
 
         # ── 2. Compliance deadlines ──────────────────────────────────────
