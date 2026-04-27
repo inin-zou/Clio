@@ -1,0 +1,27 @@
+{
+  "cli_version": "0.5.6",
+  "checkpoint_id": "e3e7bf293a2a",
+  "strategy": "manual-commit",
+  "branch": "main",
+  "checkpoints_count": 3,
+  "files_touched": [
+    "frontend/app/architecture/page.tsx",
+    "frontend/app/globals.css",
+    "model_service/deploy/modal_app.py"
+  ],
+  "sessions": [
+    {
+      "metadata": "/e3/e7bf293a2a/0/metadata.json",
+      "transcript": "/e3/e7bf293a2a/0/full.jsonl",
+      "content_hash": "/e3/e7bf293a2a/0/content_hash.txt",
+      "prompt": "/e3/e7bf293a2a/0/prompt.txt"
+    }
+  ],
+  "token_usage": {
+    "input_tokens": 68,
+    "cache_creation_tokens": 654421,
+    "cache_read_tokens": 18178015,
+    "output_tokens": 42723,
+    "api_call_count": 33
+  }
+}
