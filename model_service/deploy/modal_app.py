@@ -1082,6 +1082,17 @@ class PersonaPlexService:
                                 and drip.silent_frames_remaining == 0
                             ):
                                 agent_pcm_np = np.zeros_like(agent_pcm_np)
+                                # Also clear any stale text in the agent
+                                # buffer. Whatever Sarah was mid-saying when
+                                # the caller interrupted is now irrelevant,
+                                # AND if we leave it here, the EPAD wake-up
+                                # nudge below will be blocked by the
+                                # `not agent_text_buf.strip()` guard once the
+                                # caller's turn boundary fires — Sarah ends
+                                # up stuck in PAD-emission mode and never
+                                # responds. Clearing here lets EPAD fire
+                                # cleanly on the next turn boundary.
+                                agent_text_buf = ""
 
                             # Push to LiveKit as int16 PCM
                             agent_int16 = _float32_to_int16(agent_pcm_np)

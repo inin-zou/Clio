@@ -64,9 +64,13 @@ See [`.claude/docs/architecture-decision.md`](.claude/docs/architecture-decision
                                                           (Vercel)
 ```
 
-- **`model_service/`** — PersonaPlex 7B + Mimi codec inference + drip-feed token injection. Deployed to Modal A100 GPU.
-- **`backend/`** — FastAPI orchestrator (FNOL state, slot extractor, intervention gate), Twilio webhook, Supabase writer. Deployed to Modal CPU.
-- **`frontend/`** — Next.js 15 monitoring dashboard (3-pane glass design). Subscribes to Supabase Realtime — no direct backend coupling. Deployable to Vercel.
+- **`model_service/`** — PersonaPlex 7B + Mimi codec inference + drip-feed token injection. Deployed to Modal **A100 80GB** (sized for the documented ~1.75GB/min CUDA-graph leak — peak per-call usage is ~33GB, which leaves comfortable headroom).
+- **`backend/`** — FastAPI orchestrator (FNOL state, slot extractor, intervention gate, structural anchor filter, audio-rescue trigger), Twilio webhook, Supabase writer. Deployed to Modal CPU.
+- **`frontend/`** — Next.js 15 dashboard (dark glass design). Three views:
+  - **`/` Operations** — live transcript bubbles (caller left, agent right), editable claim draft (click to edit any FNOL field, writes back via Supabase RLS update policy), Send follow-up button.
+  - **`/` Context Vault tab** — read-only mirror of Sarah's persona prompt, critical slots, compliance / wrap-up phrasings, gate timings, VAD thresholds.
+  - **`/architecture`** — standalone tech-overview page: three-planes diagram, latency-budget bar chart vs half-duplex, stack comparison table, measured benchmarks. Not linked from the main nav (direct URL only).
+  Subscribes to Supabase Realtime — no direct backend coupling. Deployable to Vercel.
 - **`db/`** — Supabase schema (`supabase_schema.sql`). Apply once via Supabase SQL Editor.
 - **`data/`** — Mock policy DB + per-call session JSON dumps (gitignored).
 - **`.claude/`** — Project context for future Claude Code sessions. Includes:
@@ -123,7 +127,7 @@ SIP URI into `LIVEKIT_SIP_URI` in `.env`.
 Three things to deploy (in order):
 
 ```bash
-# 1. GPU model service (always-warm A100)
+# 1. GPU model service (always-warm A100 80GB, ~$50/day)
 CLIO_DEMO_MODE=1 modal deploy model_service/deploy/modal_app.py
 
 # 2. CPU backend (FastAPI control plane + Twilio webhook + Supabase writer)
@@ -247,19 +251,38 @@ caller audio    │                                                       │
    from talking over the caller — forcing the text PAD token alone
    doesn't silence the audio head.
 
-### Reasoner is a passive observer with three intervention triggers
+### Reasoner is a passive observer with four intervention triggers
 
-Default behavior: Sarah free-samples, Reasoner watches. Three gate
-triggers can override that:
+Default behavior: Sarah free-samples, Reasoner watches. Four gate
+triggers can override that, in priority order:
 
 | Trigger | When | Action |
 |---|---|---|
-| **Pending read-back** | Entity slot filled but unconfirmed for >1 caller turn | Force Sarah to read it back, then hold silence for confirmation |
-| **Compliance deadline** | Critical slot still empty after 120-180s into call | Force Sarah to ask the missing question with a templated phrasing |
-| **Wrap-up gate** | Caller signals end-of-call but critical slots missing | Force one last question before letting Sarah close |
+| **Audio rescue** | Caller signals they can't hear ("Hello? Hello?", "what did you say", "could you repeat") | Force Sarah to acknowledge: "Sorry, I'm having trouble hearing you, could you say that again?" Cooldown 20s, max 3 per call |
+| **Pending read-back** | Entity slot filled but unconfirmed for >1 caller turn | Force Sarah to read it back, then hold silence for confirmation. Re-fires every 3 caller turns up to 3 attempts |
+| **Compliance deadline** | Critical slot (`incident_type` / `incident_datetime` / `any_injuries`) still empty after its per-slot deadline (120-240s) | Force Sarah to ask the missing question with a templated phrasing |
+| **Wrap-up gate** | Caller signals end-of-call (or 25s of silence) and critical slots are still empty | Iterate through the missing slots (max 2 attempts) — drops "Before I let you go" prefix to avoid sounding like Sarah is closing |
 
 All gate texts are **hand-templated** (in `gate.py` and `drip.py`), not
 LLM-generated. Predictable latency, no inflight calls during voice loop.
+
+### Anti-hallucination: structural anchor filter on the data plane
+
+Sarah is generative. She occasionally free-samples a confident-sounding
+identifier ("On June 15.", "POL-2024-001") that the caller never said.
+Rather than try to make the persona prompt strict enough to prevent this
+(brittle), Clio drops the offending values **after extraction, before
+they reach the FNOL row**:
+
+`backend/app/reasoner/extractor.py:filter_caller_anchored()` runs
+between Haiku's slot updates and `apply_updates()`. For identifier-shaped
+slots (policy_number, license_plate, vin, claim_number, police_case_number,
+reporter_phone, reporter_name, incident_datetime), it requires the value's
+`source_quote` (or the value itself, normalized) to literally appear in
+a recent caller turn. If not, the update is dropped with a logged
+warning. Caller may still hear Sarah say a hallucinated value out loud
+(audio cosmetic, not data-corrupting), but the persisted FNOL only
+contains values the caller actually spoke.
 
 ### Optional: Tavily fact-checker (built, deactivated for latency)
 
