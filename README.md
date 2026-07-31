@@ -1,6 +1,6 @@
 # Clio
 
-Voice agent for inbound insurance claim calls. Built for the [Inca hackathon](https://www.get-inca.com/en) — the agent must convince jurors they're talking to a human while collecting complete FNOL documentation.
+Voice agent for inbound insurance claim calls. Built for the [2nd Big Berlin Hack](https://www.get-inca.com/en) — the agent must convince jurors they're talking to a human while collecting complete FNOL documentation.
 
 ## Why full-duplex, not ASR → LLM → TTS
 
